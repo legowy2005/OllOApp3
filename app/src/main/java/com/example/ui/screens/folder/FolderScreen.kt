@@ -74,7 +74,9 @@ data class CardSummary(
     val frontText: String,
     val backText: String,
     val hasFrontImage: Boolean = false,
-    val hasBackImage: Boolean = false
+    val hasBackImage: Boolean = false,
+    val frontImageId: Long? = null,
+    val backImageId: Long? = null
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -557,33 +559,31 @@ fun CardRowItemWithActions(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
                     )
-                    if (card.hasFrontImage) {
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Icon(
-                            imageVector = Icons.Default.Image,
-                            contentDescription = "Front has image",
-                            tint = colors.accent,
-                            modifier = Modifier.size(16.dp)
+                    if (card.frontImageId != null) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        com.example.ui.components.ImageThumbnail(
+                            imageId = card.frontImageId,
+                            modifier = Modifier.width(44.dp).height(33.dp)
                         )
                     }
                 }
                 Spacer(modifier = Modifier.height(2.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = if (card.backText.isNotBlank()) card.backText else if (card.hasBackImage) "[Back image]" else "(Empty back)",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = colors.textMuted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-                    if (card.hasBackImage) {
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Icon(
-                            imageVector = Icons.Default.Image,
-                            contentDescription = "Back has image",
-                            tint = colors.accent,
-                            modifier = Modifier.size(14.dp)
+                    if (card.backText.isNotBlank() || !card.hasBackImage) {
+                        Text(
+                            text = if (card.backText.isNotBlank()) card.backText else "(Empty back)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.textMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                    }
+                    if (card.backImageId != null) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        com.example.ui.components.ImageThumbnail(
+                            imageId = card.backImageId,
+                            modifier = Modifier.width(44.dp).height(33.dp)
                         )
                     }
                 }

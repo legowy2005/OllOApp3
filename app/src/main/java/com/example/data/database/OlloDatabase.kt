@@ -22,7 +22,7 @@ import kotlinx.coroutines.launch
         CardEntity::class,
         ImageEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class OlloDatabase : RoomDatabase() {
@@ -38,7 +38,7 @@ abstract class OlloDatabase : RoomDatabase() {
         // Explicit migrations defined from day one (no destructive fallback)
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                // Prepared for future schema evolution
+                db.execSQL("ALTER TABLE images ADD COLUMN format INTEGER NOT NULL DEFAULT 0")
             }
         }
 

@@ -59,14 +59,18 @@ object PacketBuilder {
         id: Long,
         width: Int,
         height: Int,
-        dataLen: Long
+        dataLen: Long,
+        format: Int = 0
     ): ByteArray {
-        val buffer = ByteBuffer.allocate(13).order(ByteOrder.LITTLE_ENDIAN)
+        // format 0 (1-bit) keeps the original 13-byte packet; other formats append one format byte.
+        val size = if (format == 0) 13 else 14
+        val buffer = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN)
         buffer.put(PacketTypes.IMG_BEGIN)
         buffer.putInt((id and 0xFFFFFFFFL).toInt())
         buffer.putShort((width and 0xFFFF).toShort())
         buffer.putShort((height and 0xFFFF).toShort())
         buffer.putInt((dataLen and 0xFFFFFFFFL).toInt())
+        if (format != 0) buffer.put((format and 0xFF).toByte())
         return buffer.array()
     }
 

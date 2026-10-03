@@ -141,6 +141,15 @@ fun PhonePreviewScreen(
                             )
                         }
 
+                        val shownImageId = if (isFrontSide) currentCard.frontImageId else currentCard.backImageId
+                        if (shownImageId != null) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            com.example.ui.components.ImageThumbnail(
+                                imageId = shownImageId,
+                                modifier = Modifier.fillMaxWidth().height(150.dp)
+                            )
+                        }
+
                         Spacer(modifier = Modifier.height(24.dp))
 
                         Row(

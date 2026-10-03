@@ -33,11 +33,11 @@ object ImageProcessor {
     data class ResolutionPreset(val name: String, val width: Int, val height: Int)
 
     val RESOLUTION_PRESETS = listOf(
-        ResolutionPreset("320x240 (Glasses Max)", 320, 240),
-        ResolutionPreset("400x300 (Medium)", 400, 300),
-        ResolutionPreset("480x360 (Standard)", 480, 360),
-        ResolutionPreset("640x400 (OLED Aspect)", 640, 400),
-        ResolutionPreset("640x480 (Editor Max)", 640, 480)
+        ResolutionPreset("320x240 (Min)", 320, 240),
+        ResolutionPreset("400x300", 400, 300),
+        ResolutionPreset("480x360", 480, 360),
+        ResolutionPreset("640x400 (OLED native)", 640, 400),
+        ResolutionPreset("640x480 (Max)", 640, 480)
     )
 
     /**
@@ -178,8 +178,8 @@ object ImageProcessor {
         isColorMode: Boolean = false,
         backgroundColorArgb: Int = AndroidColor.WHITE
     ): ProcessedImageResult {
-        val clampedTargetW = targetWidth.coerceIn(1, DeviceLimits.EDITOR_MAX_W)
-        val clampedTargetH = targetHeight.coerceIn(1, DeviceLimits.EDITOR_MAX_H)
+        val clampedTargetW = targetWidth.coerceIn(DeviceLimits.EDITOR_MIN_W, DeviceLimits.EDITOR_MAX_W)
+        val clampedTargetH = targetHeight.coerceIn(DeviceLimits.EDITOR_MIN_H, DeviceLimits.EDITOR_MAX_H)
 
         // 1. Rotate & flip matrix
         val matrix = Matrix()
@@ -223,13 +223,10 @@ object ImageProcessor {
             true
         )
 
-        // 5. Scale down for device limits (max 320x240) preserving aspect ratio
-        val (deviceW, deviceH) = calculateFitDimensions(
-            clampedTargetW,
-            clampedTargetH,
-            DeviceLimits.deviceMaxW,
-            DeviceLimits.deviceMaxH
-        )
+        // 5. Fit to device limits (1-bit: up to 640x480, color: up to 320x240), keep aspect ratio
+        val limitW = if (isColorMode) DeviceLimits.COLOR_MAX_W else DeviceLimits.deviceMaxW
+        val limitH = if (isColorMode) DeviceLimits.COLOR_MAX_H else DeviceLimits.deviceMaxH
+        val (deviceW, deviceH) = calculateFitDimensions(clampedTargetW, clampedTargetH, limitW, limitH)
 
         val deviceBitmap = Bitmap.createScaledBitmap(displayBitmap, deviceW, deviceH, true)
 
@@ -237,7 +234,9 @@ object ImageProcessor {
         val devicePixels = IntArray(deviceW * deviceH)
         deviceBitmap.getPixels(devicePixels, 0, deviceW, 0, 0, deviceW, deviceH)
 
-        val packedBytes = if (useDithering) {
+        val packedBytes = if (isColorMode) {
+            packRgb565(devicePixels)
+        } else if (useDithering) {
             floydSteinbergDither(devicePixels, deviceW, deviceH, invert)
         } else {
             threshold1Bit(devicePixels, deviceW, deviceH, threshold, invert)
@@ -269,6 +268,41 @@ object ImageProcessor {
             checksum = checksum,
             isColor = isColorMode
         )
+    }
+
+    /** RGB565, little-endian, row-major, 2 bytes per pixel (experimental color format). */
+    private fun packRgb565(pixels: IntArray): ByteArray {
+        val out = ByteArray(pixels.size * 2)
+        for (i in pixels.indices) {
+            val p = pixels[i]
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            val v = ((r shr 3) shl 11) or ((g shr 2) shl 5) or (b shr 3)
+            out[i * 2] = (v and 0xFF).toByte()
+            out[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+        }
+        return out
+    }
+
+    /** Preview bitmap for stored device data, whichever format it is. */
+    fun createPreviewBitmap(data: ByteArray, width: Int, height: Int, format: Int): Bitmap =
+        if (format == 0) createOledPreviewBitmap(data, width, height)
+        else createRgb565PreviewBitmap(data, width, height)
+
+    fun createRgb565PreviewBitmap(data: ByteArray, width: Int, height: Int): Bitmap {
+        val argb = IntArray(width * height)
+        for (i in argb.indices) {
+            if (i * 2 + 1 >= data.size) break
+            val v = (data[i * 2].toInt() and 0xFF) or ((data[i * 2 + 1].toInt() and 0xFF) shl 8)
+            val r = ((v shr 11) and 0x1F) * 255 / 31
+            val g = ((v shr 5) and 0x3F) * 255 / 63
+            val b = (v and 0x1F) * 255 / 31
+            argb[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        }
+        val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        bmp.setPixels(argb, 0, width, 0, 0, width, height)
+        return bmp
     }
 
     private fun calculateFitDimensions(w: Int, h: Int, maxW: Int, maxH: Int): Pair<Int, Int> {

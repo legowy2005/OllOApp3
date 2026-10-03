@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -15,6 +16,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.ui.components.LocalImagePreviewLoader
 import com.example.ui.screens.card.CardEditorScreen
 import com.example.ui.screens.folder.FolderScreen
 import com.example.ui.screens.home.HomeScreen
@@ -80,7 +82,19 @@ fun OlloAppNavigation(
     val deviceName by activeTransport.deviceName.collectAsStateWithLifecycle()
     val rssi by activeTransport.rssi.collectAsStateWithLifecycle()
 
-    val totalStorageBytes = storageBudgetKb * 1024L
+    val glassesStorage by viewModel.glassesStorage.collectAsStateWithLifecycle()
+    val scanResults by viewModel.scanResults.collectAsStateWithLifecycle()
+    val isScanning by viewModel.isScanning.collectAsStateWithLifecycle()
+
+    // When connected, show the glasses' REAL storage instead of the offline estimate
+    val realStorage = if (isConnected) glassesStorage else null
+    val totalStorageBytes = realStorage?.first ?: (storageBudgetKb * 1024L)
+    val shownUsedStorageBytes = realStorage?.second ?: offlineEstimateBytes
+    val shownFreeOnGlasses = realStorage?.let { (it.first - it.second).coerceAtLeast(0L) } ?: freeStorageBytesOnGlasses
+
+    // Card editor drafts: keep typed text when jumping to the image editor and back
+    var draftFrontText by remember { mutableStateOf<String?>(null) }
+    var draftBackText by remember { mutableStateOf<String?>(null) }
 
     // Temporary image attachment holding for active card editor
     var pendingFrontImageId by remember { mutableStateOf<Long?>(null) }
@@ -94,6 +108,11 @@ fun OlloAppNavigation(
         navigateBack()
     }
 
+    val imagePreviewLoader: suspend (Long) -> androidx.compose.ui.graphics.ImageBitmap? = remember(viewModel) {
+        val loader: suspend (Long) -> androidx.compose.ui.graphics.ImageBitmap? = { id -> viewModel.loadImagePreview(id) }
+        loader
+    }
+    CompositionLocalProvider(LocalImagePreviewLoader provides imagePreviewLoader) {
     AnimatedContent(
         targetState = currentDestination,
         transitionSpec = { fadeIn() togetherWith fadeOut() },
@@ -107,7 +126,7 @@ fun OlloAppNavigation(
                     searchQuery = searchQuery,
                     searchResults = searchResults,
                     isConnected = isConnected,
-                    usedStorageBytes = offlineEstimateBytes,
+                    usedStorageBytes = shownUsedStorageBytes,
                     totalStorageBytes = totalStorageBytes,
                     onSearchQueryChange = { viewModel.setSearchQuery(it) },
                     onFolderClick = { id, name ->
@@ -149,12 +168,17 @@ fun OlloAppNavigation(
                     onAddCardClick = {
                         pendingFrontImageId = null
                         pendingBackImageId = null
+                        draftFrontText = null
+                        draftBackText = null
                         navigateTo(OlloDestination.CardEditor(destination.folderId))
                     },
                     onEditCardClick = { cardId ->
                         val card = currentCards.find { it.id == cardId }
-                        pendingFrontImageId = if (card?.hasFrontImage == true) 1L else null
-                        pendingBackImageId = if (card?.hasBackImage == true) 1L else null
+                        // Use the card's REAL image ids (a fake id here used to wipe the image on save)
+                        pendingFrontImageId = card?.frontImageId
+                        pendingBackImageId = card?.backImageId
+                        draftFrontText = null
+                        draftBackText = null
                         navigateTo(OlloDestination.CardEditor(destination.folderId, cardId))
                     },
                     onDuplicateCard = { cardId ->
@@ -200,10 +224,12 @@ fun OlloAppNavigation(
                 val existingCard = destination.cardId?.let { cid -> currentCards.find { it.id == cid } }
 
                 CardEditorScreen(
-                    initialFrontText = existingCard?.frontText ?: "",
-                    initialBackText = existingCard?.backText ?: "",
-                    hasFrontImage = pendingFrontImageId != null || existingCard?.hasFrontImage == true,
-                    hasBackImage = pendingBackImageId != null || existingCard?.hasBackImage == true,
+                    initialFrontText = draftFrontText ?: existingCard?.frontText ?: "",
+                    initialBackText = draftBackText ?: existingCard?.backText ?: "",
+                    hasFrontImage = pendingFrontImageId != null,
+                    hasBackImage = pendingBackImageId != null,
+                    frontImageId = pendingFrontImageId,
+                    backImageId = pendingBackImageId,
                     onSave = { front, back ->
                         viewModel.saveCard(
                             folderId = destination.folderId,
@@ -215,14 +241,20 @@ fun OlloAppNavigation(
                         )
                         pendingFrontImageId = null
                         pendingBackImageId = null
+                        draftFrontText = null
+                        draftBackText = null
                         navigateBack()
                     },
                     onBackClick = {
                         pendingFrontImageId = null
                         pendingBackImageId = null
+                        draftFrontText = null
+                        draftBackText = null
                         navigateBack()
                     },
-                    onOpenImagePicker = { isFront ->
+                    onOpenImagePicker = { isFront, frontText, backText ->
+                        draftFrontText = frontText
+                        draftBackText = backText
                         navigateTo(OlloDestination.ImageEditor(destination.folderId, destination.cardId, isFront))
                     },
                     modifier = modifier
@@ -255,7 +287,7 @@ fun OlloAppNavigation(
                     rssi = rssi,
                     usedStorageBytes = offlineEstimateBytes,
                     totalStorageBytes = totalStorageBytes,
-                    freeStorageBytes = freeStorageBytesOnGlasses,
+                    freeStorageBytes = shownFreeOnGlasses,
                     includedFolders = includedFolders.map { it.name },
                     totalCardsCount = totalCards,
                     syncPhase = syncPhase,
@@ -282,13 +314,24 @@ fun OlloAppNavigation(
                     autoReconnect = autoReconnect,
                     useSimulatedGlasses = useSimulatedGlasses,
                     packetLogs = bleLogs,
+                    isConnected = isConnected,
+                    connectedDeviceName = deviceName,
+                    scanResults = scanResults,
+                    isScanning = isScanning,
+                    requiredPermissions = viewModel.requiredBlePermissions(),
+                    hasPermissions = { viewModel.hasBlePermissions() },
+                    isBluetoothOn = { viewModel.isBluetoothOn() },
+                    onStartScan = { viewModel.startScan() },
+                    onStopScan = { viewModel.stopScan() },
+                    onConnectDevice = { viewModel.connectToDevice(it) },
+                    onDisconnect = { viewModel.disconnectGlasses() },
                     onUpdateBudgetKb = { viewModel.setStorageBudgetKb(it) },
                     onToggleAutoReconnect = { viewModel.setAutoReconnect(it) },
                     onToggleSimulatedGlasses = {
                         viewModel.setUseSimulatedGlasses(it)
                     },
                     onForgetGlasses = {
-                        viewModel.setUseSimulatedGlasses(false)
+                        viewModel.forgetGlasses()
                     },
                     onBackClick = { navigateBack() },
                     modifier = modifier
@@ -304,5 +347,6 @@ fun OlloAppNavigation(
                 )
             }
         }
+    }
     }
 }

@@ -3,7 +3,14 @@ package com.example.ui.viewmodel
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import com.example.ble.AndroidBleTransport
+import com.example.ble.IncomingPacket
+import com.example.ble.PacketBuilder
+import com.example.ble.ScannedDevice
+import com.example.core.DeviceLimits
+import com.example.core.ImageProcessor
 import com.example.ble.GlassesConnectionState
 import com.example.ble.GlassesTransport
 import com.example.ble.SimulatedGlasses
@@ -52,7 +59,7 @@ class OlloViewModel(application: Application) : AndroidViewModel(application) {
     private val _autoReconnect = MutableStateFlow(true)
     val autoReconnect: StateFlow<Boolean> = _autoReconnect.asStateFlow()
 
-    private val _useSimulatedGlasses = MutableStateFlow(true)
+    private val _useSimulatedGlasses = MutableStateFlow(false)
     val useSimulatedGlasses: StateFlow<Boolean> = _useSimulatedGlasses.asStateFlow()
 
     private val _bleLogs = MutableStateFlow<List<BleLogEntry>>(emptyList())
@@ -77,6 +84,15 @@ class OlloViewModel(application: Application) : AndroidViewModel(application) {
     private val _freeStorageBytesOnGlasses = MutableStateFlow<Long?>(null)
     val freeStorageBytesOnGlasses: StateFlow<Long?> = _freeStorageBytesOnGlasses.asStateFlow()
 
+    /** Real flash numbers reported by the glasses: (totalBytes, usedBytes). Null when not connected. */
+    private val _glassesStorage = MutableStateFlow<Pair<Long, Long>?>(null)
+    val glassesStorage: StateFlow<Pair<Long, Long>?> = _glassesStorage.asStateFlow()
+
+    private val _limitsVersion = MutableStateFlow(0)
+    val limitsVersion: StateFlow<Int> = _limitsVersion.asStateFlow()
+
+    private val previewCache = HashMap<Long, ImageBitmap>()
+
     private val dateFormat = SimpleDateFormat("MMM d, HH:mm", Locale.getDefault())
 
     // Active Transport (either simulator or Android BLE hardware)
@@ -90,6 +106,73 @@ class OlloViewModel(application: Application) : AndroidViewModel(application) {
         scope = viewModelScope,
         onPacketLogged = { dir, name, hex, notes -> addBleLog(dir, name, hex, notes) }
     )
+
+    val scanResults: StateFlow<List<ScannedDevice>> = androidBleTransport.scanResults
+    val isScanning: StateFlow<Boolean> = androidBleTransport.isScanning
+
+    fun requiredBlePermissions(): Array<String> = androidBleTransport.requiredPermissions()
+    fun hasBlePermissions(): Boolean = androidBleTransport.hasPermissions()
+    fun isBluetoothOn(): Boolean = androidBleTransport.isBluetoothOn()
+    fun savedGlassesName(): String? = androidBleTransport.lastName
+
+    fun startScan() {
+        if (_useSimulatedGlasses.value) setUseSimulatedGlasses(false)
+        androidBleTransport.startScan()
+    }
+
+    fun stopScan() = androidBleTransport.stopScan()
+
+    fun connectToDevice(address: String) {
+        viewModelScope.launch {
+            if (_useSimulatedGlasses.value) setUseSimulatedGlasses(false)
+            androidBleTransport.stopScan()
+            androidBleTransport.disconnect()
+            androidBleTransport.connect(address)
+        }
+    }
+
+    fun disconnectGlasses() {
+        viewModelScope.launch { getActiveTransport().disconnect() }
+    }
+
+    fun forgetGlasses() {
+        viewModelScope.launch {
+            androidBleTransport.disconnect()
+            androidBleTransport.forgetSavedDevice()
+            _glassesStorage.value = null
+        }
+    }
+
+    /** Asks the glasses for firmware limits and real free storage. */
+    fun refreshGlassesInfo() {
+        viewModelScope.launch {
+            val t = getActiveTransport()
+            if (t.connectionState.value != GlassesConnectionState.CONNECTED) return@launch
+            t.sendPacket(PacketBuilder.buildGetInfo())
+            kotlinx.coroutines.delay(250)
+            t.sendPacket(PacketBuilder.buildGetStorage())
+        }
+    }
+
+    private fun handleGlassesNotification(packet: IncomingPacket) {
+        when (packet) {
+            is IncomingPacket.StorageInfo -> _glassesStorage.value = packet.totalBytes to packet.usedBytes
+            is IncomingPacket.Info -> {
+                DeviceLimits.updateLimits(packet.maxWidth, packet.maxHeight, packet.maxImageBytes, packet.maxTextBytes, packet.supportsColor)
+                _limitsVersion.value = _limitsVersion.value + 1
+            }
+            else -> {}
+        }
+    }
+
+    /** Preview of a stored image exactly as the glasses will show it (cached). */
+    suspend fun loadImagePreview(imageId: Long): ImageBitmap? {
+        previewCache[imageId]?.let { return it }
+        val image = repository.getImage(imageId) ?: return null
+        val bmp = ImageProcessor.createPreviewBitmap(image.deviceData, image.width, image.height, image.format).asImageBitmap()
+        previewCache[imageId] = bmp
+        return bmp
+    }
 
     fun getActiveTransport(): GlassesTransport {
         return if (_useSimulatedGlasses.value) simulatedGlasses else androidBleTransport
@@ -126,7 +209,9 @@ class OlloViewModel(application: Application) : AndroidViewModel(application) {
                         frontText = card.frontText,
                         backText = card.backText,
                         hasFrontImage = card.frontImageId != null && card.frontImageId > 0,
-                        hasBackImage = card.backImageId != null && card.backImageId > 0
+                        hasBackImage = card.backImageId != null && card.backImageId > 0,
+                        frontImageId = card.frontImageId?.takeIf { it > 0 },
+                        backImageId = card.backImageId?.takeIf { it > 0 }
                     )
                 }
             }
@@ -152,6 +237,31 @@ class OlloViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         refreshEstimate()
+
+        // Learn limits + real storage as soon as any transport connects; keep them fresh afterwards
+        listOf<GlassesTransport>(androidBleTransport, simulatedGlasses).forEach { transport ->
+            viewModelScope.launch { transport.notifications.collect { handleGlassesNotification(it) } }
+            viewModelScope.launch {
+                transport.connectionState.collect { state ->
+                    if (state == GlassesConnectionState.CONNECTED) {
+                        kotlinx.coroutines.delay(400)
+                        refreshGlassesInfo()
+                    } else if (state == GlassesConnectionState.DISCONNECTED && transport === getActiveTransport()) {
+                        _glassesStorage.value = null
+                    }
+                }
+            }
+        }
+
+        // Reconnect to the last used glasses on launch
+        viewModelScope.launch {
+            if (!_useSimulatedGlasses.value && _autoReconnect.value &&
+                androidBleTransport.lastAddress != null &&
+                androidBleTransport.hasPermissions() && androidBleTransport.isBluetoothOn()
+            ) {
+                androidBleTransport.connect()
+            }
+        }
 
         // Auto-connect simulator on startup
         viewModelScope.launch {
@@ -253,6 +363,9 @@ class OlloViewModel(application: Application) : AndroidViewModel(application) {
                 simulatedGlasses.connect()
             } else {
                 simulatedGlasses.disconnect()
+                if (androidBleTransport.lastAddress != null && androidBleTransport.hasPermissions()) {
+                    androidBleTransport.connect()
+                }
             }
         }
     }
@@ -337,7 +450,8 @@ class OlloViewModel(application: Application) : AndroidViewModel(application) {
                     width = result.deviceWidth,
                     height = result.deviceHeight,
                     deviceData = result.deviceData,
-                    displayData = result.displayData
+                    displayData = result.displayData,
+                    format = if (result.isColor) 1 else 0
                 )
             )
             refreshEstimate()

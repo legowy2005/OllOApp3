@@ -92,7 +92,8 @@ class SyncEngine(
                 maxW = infoPacket.maxWidth,
                 maxH = infoPacket.maxHeight,
                 maxImgBytes = infoPacket.maxImageBytes,
-                maxTxtBytes = infoPacket.maxTextBytes
+                maxTxtBytes = infoPacket.maxTextBytes,
+                colorSupported = infoPacket.supportsColor
             )
         }
 
@@ -308,7 +309,8 @@ class SyncEngine(
                 id = image.id,
                 width = image.width,
                 height = image.height,
-                dataLen = image.deviceData.size.toLong()
+                dataLen = image.deviceData.size.toLong(),
+                format = image.format
             )
 
             val beginStatus = withTimeoutOrNull(BleConstants.ACK_TIMEOUT_MS) {
@@ -329,6 +331,8 @@ class SyncEngine(
             }
 
             if (!beginStatus.isOk) {
+                // Glasses firmware can't take color yet: skip this image, keep syncing the rest.
+                if (image.format != 0) return true
                 delay(100)
                 continue
             }

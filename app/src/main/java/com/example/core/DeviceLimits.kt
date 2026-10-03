@@ -2,27 +2,36 @@ package com.example.core
 
 /**
  * Hardware limits enforced by the smart glasses firmware.
- * Can be dynamically updated if GET_INFO is supported by the firmware.
+ * Updated at runtime from the glasses' GET_INFO reply.
  */
 object DeviceLimits {
-    const val DEFAULT_DEVICE_MAX_W: Int = 320
-    const val DEFAULT_DEVICE_MAX_H: Int = 240
-    const val DEFAULT_MAX_IMAGE_BYTES: Int = 10240
+    // 1-bit images: 320x240 (min) up to 640x480 (max) = 38,400 bytes
+    const val DEFAULT_DEVICE_MAX_W: Int = 640
+    const val DEFAULT_DEVICE_MAX_H: Int = 480
+    const val DEFAULT_MAX_IMAGE_BYTES: Int = 38400
     const val DEFAULT_MAX_TEXT_BYTES: Int = 100
+    const val EDITOR_MIN_W: Int = 320
+    const val EDITOR_MIN_H: Int = 240
     const val EDITOR_MAX_W: Int = 640
     const val EDITOR_MAX_H: Int = 480
+
+    // Experimental RGB565 color images (2 bytes per pixel): 320x240 = 153,600 bytes
+    const val COLOR_MAX_W: Int = 320
+    const val COLOR_MAX_H: Int = 240
 
     // Runtime active limits (replaced if GET_INFO answers)
     var deviceMaxW: Int = DEFAULT_DEVICE_MAX_W
     var deviceMaxH: Int = DEFAULT_DEVICE_MAX_H
     var maxImageBytes: Int = DEFAULT_MAX_IMAGE_BYTES
     var maxTextBytes: Int = DEFAULT_MAX_TEXT_BYTES
+    var supportsColor: Boolean = false
 
-    fun updateLimits(maxW: Int, maxH: Int, maxImgBytes: Long, maxTxtBytes: Int) {
+    fun updateLimits(maxW: Int, maxH: Int, maxImgBytes: Long, maxTxtBytes: Int, colorSupported: Boolean = false) {
         deviceMaxW = maxW
         deviceMaxH = maxH
         maxImageBytes = maxImgBytes.toInt()
         maxTextBytes = maxTxtBytes
+        supportsColor = colorSupported
     }
 
     fun resetToDefaults() {
@@ -30,5 +39,6 @@ object DeviceLimits {
         deviceMaxH = DEFAULT_DEVICE_MAX_H
         maxImageBytes = DEFAULT_MAX_IMAGE_BYTES
         maxTextBytes = DEFAULT_MAX_TEXT_BYTES
+        supportsColor = false
     }
 }

@@ -191,7 +191,7 @@ class SimulatedGlasses(
         val expectedDataLen = (((width + 7) / 8) * height).toLong()
 
         // Rule 5.5: id != 0; 1 <= width <= 320; 1 <= height <= 240; dataLen == ((width + 7) / 8) * height; dataLen <= 10240; enough space
-        if (id == 0L || width !in 1..320 || height !in 1..240 || dataLen != expectedDataLen || dataLen > 10240) {
+        if (id == 0L || width !in 1..640 || height !in 1..480 || dataLen != expectedDataLen || dataLen > 38400) {
             emitStatus(PacketTypes.IMG_BEGIN, PacketTypes.STATUS_ERROR)
             return
         }
@@ -329,15 +329,16 @@ class SimulatedGlasses(
         val infoPacket = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN).apply {
             put(PacketTypes.NOTIFY_INFO)
             put(1.toByte()) // protocolVersion: 1
-            putShort(320.toShort()) // maxWidth: 320
-            putShort(240.toShort()) // maxHeight: 240
-            putInt(10240) // maxImageBytes: 10240
+            putShort(640.toShort()) // maxWidth: 640
+            putShort(480.toShort()) // maxHeight: 480
+            putInt(38400) // maxImageBytes: 38400
             put(100.toByte()) // maxTextBytes: 100
+            put(0.toByte()) // flags: bit0 color (not yet)
         }.array()
 
         val parsed = PacketParser.parse(infoPacket)
         val hex = PacketBuilder.toHexString(infoPacket)
-        onPacketLogged?.invoke("GLASSES -> APP", "INFO (0x82)", hex, "Firmware v1, 320x240, 10240 img, 100 txt")
+        onPacketLogged?.invoke("GLASSES -> APP", "INFO (0x82)", hex, "Firmware v1, 640x480, 38400 img, 100 txt")
         _notifications.emit(parsed)
     }
 

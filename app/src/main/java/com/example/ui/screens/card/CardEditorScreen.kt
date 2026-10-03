@@ -56,9 +56,11 @@ fun CardEditorScreen(
     initialBackText: String = "",
     hasFrontImage: Boolean = false,
     hasBackImage: Boolean = false,
+    frontImageId: Long? = null,
+    backImageId: Long? = null,
     onSave: (frontText: String, backText: String) -> Unit,
     onBackClick: () -> Unit,
-    onOpenImagePicker: (isFront: Boolean) -> Unit,
+    onOpenImagePicker: (isFront: Boolean, frontText: String, backText: String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val colors = OlloTheme.colors
@@ -146,7 +148,8 @@ fun CardEditorScreen(
                 hasModifications = frontCheck.hasModifications,
                 isOverLimit = isFrontOverLimit,
                 hasImage = hasFrontImage,
-                onAddImageClick = { onOpenImagePicker(true) },
+                imageId = frontImageId,
+                onAddImageClick = { onOpenImagePicker(true, frontRawText, backRawText) },
                 testTag = "front_text_field"
             )
 
@@ -160,7 +163,8 @@ fun CardEditorScreen(
                 hasModifications = backCheck.hasModifications,
                 isOverLimit = isBackOverLimit,
                 hasImage = hasBackImage,
-                onAddImageClick = { onOpenImagePicker(false) },
+                imageId = backImageId,
+                onAddImageClick = { onOpenImagePicker(false, frontRawText, backRawText) },
                 testTag = "back_text_field"
             )
 
@@ -204,7 +208,8 @@ fun SideEditorBox(
     hasImage: Boolean,
     onAddImageClick: () -> Unit,
     testTag: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    imageId: Long? = null
 ) {
     val colors = OlloTheme.colors
 
@@ -295,11 +300,18 @@ fun SideEditorBox(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text(
-                            text = "1-bit Image Attached",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = colors.accent
-                        )
+                        if (imageId != null) {
+                            com.example.ui.components.ImageThumbnail(
+                                imageId = imageId,
+                                modifier = Modifier.width(96.dp).height(72.dp)
+                            )
+                        } else {
+                            Text(
+                                text = "Image attached",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = colors.accent
+                            )
+                        }
                     }
                 } else {
                     Text(

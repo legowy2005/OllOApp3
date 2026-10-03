@@ -34,8 +34,11 @@ sealed class IncomingPacket {
         val maxWidth: Int,
         val maxHeight: Int,
         val maxImageBytes: Long,
-        val maxTextBytes: Int
-    ) : IncomingPacket()
+        val maxTextBytes: Int,
+        val flags: Int = 0 // bit0 = glasses firmware accepts RGB565 color images
+    ) : IncomingPacket() {
+        val supportsColor: Boolean get() = (flags and 0x01) != 0
+    }
 
     data class Unknown(
         val rawBytes: ByteArray
@@ -85,13 +88,14 @@ object PacketParser {
                 }
 
                 PacketTypes.NOTIFY_INFO -> {
-                    if (bytes.size >= 12) {
+                    if (bytes.size >= 11) {
                         val version = buffer.get().toInt() and 0xFF
                         val maxW = buffer.getShort().toInt() and 0xFFFF
                         val maxH = buffer.getShort().toInt() and 0xFFFF
                         val maxImg = buffer.getInt().toLong() and 0xFFFFFFFFL
                         val maxTxt = buffer.get().toInt() and 0xFF
-                        IncomingPacket.Info(version, maxW, maxH, maxImg, maxTxt)
+                        val flags = if (buffer.hasRemaining()) buffer.get().toInt() and 0xFF else 0
+                        IncomingPacket.Info(version, maxW, maxH, maxImg, maxTxt, flags)
                     } else {
                         IncomingPacket.Unknown(bytes)
                     }

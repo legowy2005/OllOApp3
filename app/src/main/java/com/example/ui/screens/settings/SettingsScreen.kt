@@ -1,5 +1,10 @@
 package com.example.ui.screens.settings
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
+import androidx.compose.material3.CircularProgressIndicator
+import com.example.ble.ScannedDevice
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -65,6 +70,17 @@ fun SettingsScreen(
     autoReconnect: Boolean,
     useSimulatedGlasses: Boolean,
     packetLogs: List<BleLogEntry>,
+    isConnected: Boolean,
+    connectedDeviceName: String?,
+    scanResults: List<ScannedDevice>,
+    isScanning: Boolean,
+    requiredPermissions: Array<String>,
+    hasPermissions: () -> Boolean,
+    isBluetoothOn: () -> Boolean,
+    onStartScan: () -> Unit,
+    onStopScan: () -> Unit,
+    onConnectDevice: (String) -> Unit,
+    onDisconnect: () -> Unit,
     onUpdateBudgetKb: (Int) -> Unit,
     onToggleAutoReconnect: (Boolean) -> Unit,
     onToggleSimulatedGlasses: (Boolean) -> Unit,
@@ -77,6 +93,25 @@ fun SettingsScreen(
     var showBudgetDialog by remember { mutableStateOf(false) }
     var budgetInput by remember { mutableStateOf(storageBudgetKb.toString()) }
     var showLogsDialog by remember { mutableStateOf(false) }
+    var showDevicesDialog by remember { mutableStateOf(false) }
+    var scanMessage by remember { mutableStateOf<String?>(null) }
+
+    fun beginScan() {
+        if (!isBluetoothOn()) {
+            scanMessage = "Turn Bluetooth on first"
+            return
+        }
+        scanMessage = null
+        showDevicesDialog = true
+        onStartScan()
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        if (grants.values.all { it }) beginScan()
+        else scanMessage = "Bluetooth permission is required to find the glasses"
+    }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -168,6 +203,32 @@ fun SettingsScreen(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
+                Text(
+                    text = if (isConnected) "Connected: ${connectedDeviceName ?: "Ollo"}" else "Not connected",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (isConnected) colors.accent else colors.textMuted
+                )
+                scanMessage?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = colors.warning)
+                }
+
+                OlloPrimaryButton(
+                    text = "Add device",
+                    onClick = {
+                        if (hasPermissions()) beginScan() else permissionLauncher.launch(requiredPermissions)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    testTag = "add_device_button"
+                )
+
+                if (isConnected) {
+                    OlloSecondaryButton(
+                        text = "Disconnect",
+                        onClick = onDisconnect,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
                 OlloSecondaryButton(
                     text = "Forget Paired Glasses",
                     onClick = onForgetGlasses,
@@ -214,6 +275,78 @@ fun SettingsScreen(
                 )
             }
         }
+    }
+
+    // Available devices dialog
+    if (showDevicesDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                onStopScan()
+                showDevicesDialog = false
+            },
+            containerColor = colors.surfaceElevated,
+            shape = RoundedCornerShape(20.dp),
+            title = { Text("Available devices", color = colors.onBackground) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (isScanning) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = colors.accent)
+                        Text(
+                            text = if (isScanning) "Scanning..." else "Scan finished",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.textMuted
+                        )
+                    }
+                    Box(modifier = Modifier.height(260.dp)) {
+                        if (scanResults.isEmpty()) {
+                            Text(
+                                text = if (isScanning) "Looking for glasses nearby. Make sure they are powered on." else "No devices found. Tap Rescan.",
+                                color = colors.textMuted
+                            )
+                        } else {
+                            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(scanResults) { device ->
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(colors.surface)
+                                            .border(1.dp, if (device.isOllo) colors.accent else colors.outline, RoundedCornerShape(10.dp))
+                                            .clickable {
+                                                onStopScan()
+                                                showDevicesDialog = false
+                                                onConnectDevice(device.address)
+                                            }
+                                            .padding(12.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(device.name, style = MaterialTheme.typography.titleSmall, color = colors.onBackground)
+                                                Text(device.address, style = MaterialTheme.typography.bodySmall, color = colors.textFaint)
+                                            }
+                                            Text("${device.rssi} dBm", style = MaterialTheme.typography.labelSmall, color = colors.textMuted)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                OlloPrimaryButton(text = "Rescan", onClick = { onStartScan() })
+            },
+            dismissButton = {
+                OlloSecondaryButton(text = "Close", onClick = {
+                    onStopScan()
+                    showDevicesDialog = false
+                })
+            }
+        )
     }
 
     // Budget Dialog

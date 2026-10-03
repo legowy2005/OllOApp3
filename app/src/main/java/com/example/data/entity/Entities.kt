@@ -68,7 +68,10 @@ data class ImageEntity(
     @ColumnInfo(name = "display_data", typeAffinity = ColumnInfo.BLOB)
     val displayData: ByteArray? = null,
     @ColumnInfo(name = "created_at")
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    /** 0 = 1-bit packed, 1 = RGB565 little-endian (experimental color) */
+    @ColumnInfo(name = "format", defaultValue = "0")
+    val format: Int = 0
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -78,6 +81,7 @@ data class ImageEntity(
         if (id != other.id) return false
         if (width != other.width) return false
         if (height != other.height) return false
+        if (format != other.format) return false
         if (!deviceData.contentEquals(other.deviceData)) return false
         if (displayData != null) {
             if (other.displayData == null) return false

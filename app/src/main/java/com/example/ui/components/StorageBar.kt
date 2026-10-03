@@ -69,12 +69,12 @@ fun StorageBar(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = if (isConnected) "Glasses Storage" else "Storage (Estimate)",
+                    text = if (isConnected) "Glasses storage left" else "Storage (estimate)",
                     style = MaterialTheme.typography.labelMedium,
                     color = colors.textMuted
                 )
                 Text(
-                    text = "$usedKb KB / $totalKb KB (${(ratio * 100).toInt()}%)",
+                    text = if (isConnected) "${(totalKb - usedKb).coerceAtLeast(0)} KB left of $totalKb KB" else "$usedKb KB / $totalKb KB (${(ratio * 100).toInt()}%)",
                     style = MaterialTheme.typography.labelMedium,
                     color = if (isNearFull) colors.warning else colors.onBackground
                 )

@@ -169,15 +169,20 @@ fun ImageEditorScreen(
     // Unpack 1-bit packed bytes into exact OLED preview image bitmap (white on black)
     val oledPreviewImageBitmap by remember(processedResult) {
         derivedStateOf {
-            ImageProcessor.createOledPreviewImageBitmap(
+            ImageProcessor.createPreviewBitmap(
                 processedResult.deviceData,
                 processedResult.deviceWidth,
-                processedResult.deviceHeight
-            )
+                processedResult.deviceHeight,
+                if (processedResult.isColor) 1 else 0
+            ).asImageBitmap()
         }
     }
 
-    val isAboveDeviceLimit = selectedWidth > DeviceLimits.deviceMaxW || selectedHeight > DeviceLimits.deviceMaxH
+    val isAboveDeviceLimit = if (isColorMode) {
+        selectedWidth > DeviceLimits.COLOR_MAX_W || selectedHeight > DeviceLimits.COLOR_MAX_H
+    } else {
+        selectedWidth > DeviceLimits.deviceMaxW || selectedHeight > DeviceLimits.deviceMaxH
+    }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -295,7 +300,7 @@ fun ImageEditorScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "Glasses: ${processedResult.deviceWidth}x${processedResult.deviceHeight}, 1-bit",
+                        text = "Glasses: ${processedResult.deviceWidth}x${processedResult.deviceHeight}, ${if (processedResult.isColor) "RGB565 color" else "1-bit"}",
                         style = MaterialTheme.typography.labelMedium,
                         color = colors.textMuted
                     )
@@ -328,7 +333,7 @@ fun ImageEditorScreen(
                             modifier = Modifier.size(20.dp)
                         )
                         Text(
-                            text = "Target resolution (${selectedWidth}x${selectedHeight}) exceeds device limit (320x240). The glasses will receive an optimized 1-bit version scaled down to ${processedResult.deviceWidth}x${processedResult.deviceHeight} (aspect ratio preserved), while the phone stores the high-resolution copy.",
+                            text = "Target resolution (${selectedWidth}x${selectedHeight}) exceeds the limit for this mode (${if (isColorMode) "${DeviceLimits.COLOR_MAX_W}x${DeviceLimits.COLOR_MAX_H} color" else "${DeviceLimits.deviceMaxW}x${DeviceLimits.deviceMaxH} 1-bit"}). The glasses will receive a version scaled down to ${processedResult.deviceWidth}x${processedResult.deviceHeight} (aspect ratio preserved), while the phone stores the high-resolution copy.",
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.warning
                         )
@@ -362,7 +367,7 @@ fun ImageEditorScreen(
             // Resolution Presets Selector (320x240 to 640x480)
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = "Resolution Presets (320x240 to 640x480)",
+                    text = "Resolution (320x240 min to 640x480 max)",
                     style = MaterialTheme.typography.titleMedium,
                     color = colors.onBackground
                 )
@@ -408,7 +413,7 @@ fun ImageEditorScreen(
                 FilterChip(
                     selected = isColorMode,
                     onClick = { isColorMode = true },
-                    label = { Text("Phone Color (with 1-bit on glasses)") },
+                    label = { Text("Color RGB565 (experimental)") },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = colors.accentMuted,
                         selectedLabelColor = colors.accent
@@ -461,11 +466,11 @@ fun ImageEditorScreen(
                                     val newW = it.toInt()
                                     if (isAspectLocked) {
                                         val ratio = selectedHeight.toFloat() / selectedWidth.toFloat()
-                                        selectedHeight = (newW * ratio).toInt().coerceIn(1, DeviceLimits.EDITOR_MAX_H)
+                                        selectedHeight = (newW * ratio).toInt().coerceIn(DeviceLimits.EDITOR_MIN_H, DeviceLimits.EDITOR_MAX_H)
                                     }
                                     selectedWidth = newW
                                 },
-                                valueRange = 100f..640f,
+                                valueRange = 320f..640f,
                                 colors = SliderDefaults.colors(
                                     thumbColor = colors.accent,
                                     activeTrackColor = colors.accent
@@ -481,11 +486,11 @@ fun ImageEditorScreen(
                                     val newH = it.toInt()
                                     if (isAspectLocked) {
                                         val ratio = selectedWidth.toFloat() / selectedHeight.toFloat()
-                                        selectedWidth = (newH * ratio).toInt().coerceIn(1, DeviceLimits.EDITOR_MAX_W)
+                                        selectedWidth = (newH * ratio).toInt().coerceIn(DeviceLimits.EDITOR_MIN_W, DeviceLimits.EDITOR_MAX_W)
                                     }
                                     selectedHeight = newH
                                 },
-                                valueRange = 100f..480f,
+                                valueRange = 240f..480f,
                                 colors = SliderDefaults.colors(
                                     thumbColor = colors.accent,
                                     activeTrackColor = colors.accent
@@ -495,7 +500,7 @@ fun ImageEditorScreen(
                     }
 
                     OlloSecondaryButton(
-                        text = "Reset to 320x240 Fit",
+                        text = "Reset to 320x240 (min)",
                         onClick = {
                             selectedWidth = 320
                             selectedHeight = 240
