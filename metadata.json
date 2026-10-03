@@ -1,0 +1,6 @@
+{
+  "name": "OllO",
+  "description": "Minimal modern flashcard app syncing to smart glasses with 1-bit display over BLE",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
