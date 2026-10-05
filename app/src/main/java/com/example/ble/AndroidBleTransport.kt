@@ -302,7 +302,8 @@ class AndroidBleTransport(
         val hex = PacketBuilder.toHexString(bytes)
         val name = if (bytes.isNotEmpty()) PacketTypes.getPacketName(bytes[0]) else "EMPTY"
         onPacketLogged?.invoke("GLASSES -> APP", name, hex, "")
-        scope.launch { _notifications.emit(parsed) }
+        // tryEmit keeps notifications in arrival order (launching a coroutine per packet could reorder them)
+        _notifications.tryEmit(parsed)
     }
 
     // ---------------------------------------------------------------------
@@ -385,7 +386,17 @@ class AndroidBleTransport(
         if (_connectionState.value != GlassesConnectionState.CONNECTED || packet.isEmpty()) return false
 
         val maxBytes = getMaxPayloadSize()
-        val toSend = if (packet.size <= maxBytes) packet else packet.copyOf(maxBytes)
+        if (packet.size > maxBytes) {
+            // Never send a cut-off packet: the glasses would parse garbage.
+            onPacketLogged?.invoke(
+                "BLE",
+                "PACKET_TOO_LARGE",
+                "",
+                "Packet is ${packet.size} bytes but the link only allows $maxBytes (MTU $negotiatedMtu)"
+            )
+            return false
+        }
+        val toSend = packet
 
         onPacketLogged?.invoke("APP -> GLASSES", PacketTypes.getPacketName(toSend[0]), PacketBuilder.toHexString(toSend), "")
 

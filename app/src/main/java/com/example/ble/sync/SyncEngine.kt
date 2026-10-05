@@ -11,6 +11,7 @@ import com.example.core.DeviceLimits
 import com.example.data.entity.ImageEntity
 import com.example.data.repository.OlloRepository
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -142,8 +143,9 @@ class SyncEngine(
         for (index in 0 until cardCount) {
             val item = cardsWithFolders[index]
             val card = item.card
-            val frontClean = AsciiTransliteration.sanitizeForGlasses(card.frontText).cleanText
-            val backClean = AsciiTransliteration.sanitizeForGlasses(card.backText).cleanText
+            val maxText = DeviceLimits.maxTextBytes.coerceIn(1, 100)
+            val frontClean = AsciiTransliteration.sanitizeForGlasses(card.frontText).cleanText.take(maxText)
+            val backClean = AsciiTransliteration.sanitizeForGlasses(card.backText).cleanText.take(maxText)
             val folderClean = AsciiTransliteration
                 .sanitizeForGlasses(item.folderName)
                 .cleanText
@@ -173,7 +175,7 @@ class SyncEngine(
                 expectedRefType = PacketTypes.CARD
             )
             if (!cardSuccess) {
-                _syncState.value = SyncState.Failed("Connection lost at card ${index + 1}", "Card Transfer")
+                _syncState.value = SyncState.Failed("Glasses did not accept card ${index + 1} (no reply or error status)", "Card Transfer")
                 return
             }
         }
@@ -231,7 +233,7 @@ class SyncEngine(
         for (attempt in 1..2) {
             val reply = withTimeoutOrNull(END_SYNC_TIMEOUT_MS) {
                 coroutineScope {
-                    val deferred = async {
+                    val deferred = async(start = CoroutineStart.UNDISPATCHED) {
                         transport.notifications
                             .filter {
                                 (it is IncomingPacket.Status && it.refType == PacketTypes.END_SYNC) ||
@@ -267,7 +269,7 @@ class SyncEngine(
     ): IncomingPacket.Info? {
         return withTimeoutOrNull(timeoutMs) {
             coroutineScope {
-                val deferred = async {
+                val deferred = async(start = CoroutineStart.UNDISPATCHED) {
                     transport.notifications
                         .filter { it is IncomingPacket.Info }
                         .first() as IncomingPacket.Info
@@ -282,7 +284,7 @@ class SyncEngine(
         for (attempt in 1..3) {
             val reply = withTimeoutOrNull(BleConstants.ACK_TIMEOUT_MS) {
                 coroutineScope {
-                    val deferred = async {
+                    val deferred = async(start = CoroutineStart.UNDISPATCHED) {
                         transport.notifications
                             .filter { it is IncomingPacket.StorageInfo }
                             .first() as IncomingPacket.StorageInfo
@@ -307,7 +309,7 @@ class SyncEngine(
         for (attempt in 1..maxRetries) {
             val status = withTimeoutOrNull(BleConstants.ACK_TIMEOUT_MS) {
                 coroutineScope {
-                    val deferred = async {
+                    val deferred = async(start = CoroutineStart.UNDISPATCHED) {
                         transport.notifications
                             .filter { it is IncomingPacket.Status && it.refType == expectedRefType }
                             .first() as IncomingPacket.Status
@@ -344,7 +346,7 @@ class SyncEngine(
 
             val beginStatus = withTimeoutOrNull(BleConstants.ACK_TIMEOUT_MS) {
                 coroutineScope {
-                    val deferred = async {
+                    val deferred = async(start = CoroutineStart.UNDISPATCHED) {
                         transport.notifications
                             .filter { it is IncomingPacket.Status && it.refType == PacketTypes.IMG_BEGIN }
                             .first() as IncomingPacket.Status
@@ -387,7 +389,7 @@ class SyncEngine(
 
             val endStatus = withTimeoutOrNull(BleConstants.ACK_TIMEOUT_MS) {
                 coroutineScope {
-                    val deferred = async {
+                    val deferred = async(start = CoroutineStart.UNDISPATCHED) {
                         transport.notifications
                             .filter { it is IncomingPacket.Status && it.refType == PacketTypes.IMG_END }
                             .first() as IncomingPacket.Status
