@@ -382,7 +382,7 @@ class AndroidBleTransport(
                         "BLE",
                         "WRITE_RETRY",
                         PacketBuilder.toHexString(toSend),
-                        "Write failed on attempt \${attempt + 1}/6 with status $result"
+                        "Write failed on attempt ${attempt + 1}/6 with status $result"
                     )
                 }
                 result == BluetoothStatusCodes.SUCCESS
