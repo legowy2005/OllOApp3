@@ -8,8 +8,16 @@ import androidx.room.Update
 import com.example.data.entity.CardEntity
 import kotlinx.coroutines.flow.Flow
 
+data class FolderCardCount(
+    @androidx.room.ColumnInfo(name = "folder_id") val folderId: Long,
+    @androidx.room.ColumnInfo(name = "card_count") val cardCount: Int
+)
+
 @Dao
 interface CardDao {
+    @Query("SELECT folder_id AS folder_id, COUNT(*) AS card_count FROM cards GROUP BY folder_id")
+    fun getCardCountsPerFolder(): Flow<List<FolderCardCount>>
+
     @Query("SELECT * FROM cards WHERE folder_id = :folderId ORDER BY sort_order ASC, created_at ASC")
     fun getCardsForFolder(folderId: Long): Flow<List<CardEntity>>
 

@@ -7,6 +7,7 @@ import com.example.data.entity.ImageEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
 data class CardWithFolderName(
@@ -22,6 +23,10 @@ class OlloRepository(
     private val imageDao = database.imageDao()
 
     val allFolders: Flow<List<FolderEntity>> = folderDao.getAllFolders()
+
+    /** Map of folderId -> number of cards, kept live by Room. Folders with no cards are absent. */
+    val cardCountsPerFolder: Flow<Map<Long, Int>> =
+        cardDao.getCardCountsPerFolder().map { rows -> rows.associate { it.folderId to it.cardCount } }
 
     fun getCardsForFolder(folderId: Long): Flow<List<CardEntity>> =
         cardDao.getCardsForFolder(folderId)

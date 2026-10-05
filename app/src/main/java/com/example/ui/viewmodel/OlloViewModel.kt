@@ -131,11 +131,44 @@ class OlloViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private var reconnectJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * Keeps trying to reach the saved glasses after the link drops (power loss, out of range...).
+     * Stops when connected, when the user disconnects/forgets the glasses, or auto-reconnect is off.
+     */
+    private fun startAutoReconnect() {
+        if (reconnectJob?.isActive == true) return
+        reconnectJob = viewModelScope.launch {
+            var attempt = 0
+            while (true) {
+                val canTry = _autoReconnect.value &&
+                    !_useSimulatedGlasses.value &&
+                    !androidBleTransport.userRequestedDisconnect &&
+                    androidBleTransport.lastAddress != null &&
+                    androidBleTransport.hasPermissions() &&
+                    androidBleTransport.isBluetoothOn()
+                if (androidBleTransport.connectionState.value == GlassesConnectionState.CONNECTED) return@launch
+                if (!canTry) {
+                    // Bluetooth off / permission missing: wait and re-check unless the user opted out
+                    if (!_autoReconnect.value || androidBleTransport.userRequestedDisconnect ||
+                        androidBleTransport.lastAddress == null || _useSimulatedGlasses.value) return@launch
+                    kotlinx.coroutines.delay(3_000)
+                    continue
+                }
+                // Backoff: 1s, 2s, 3s, 4s, then every 5s
+                kotlinx.coroutines.delay((minOf(++attempt, 5) * 1_000L))
+                if (androidBleTransport.connect()) return@launch
+            }
+        }
+    }
+
     fun disconnectGlasses() {
         viewModelScope.launch { getActiveTransport().disconnect() }
     }
 
     fun forgetGlasses() {
+        reconnectJob?.cancel()
         viewModelScope.launch {
             androidBleTransport.disconnect()
             androidBleTransport.forgetSavedDevice()
@@ -179,21 +212,22 @@ class OlloViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // Folders
-    val folders: StateFlow<List<FolderSummary>> = repository.allFolders.map { folderEntities ->
-        folderEntities.map { entity ->
-            FolderSummary(
-                id = entity.id,
-                name = entity.name,
-                cardCount = 0,
-                includeInSync = entity.includeInSync,
-                updatedAtFormatted = dateFormat.format(Date(entity.updatedAt))
-            )
-        }
-    }.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000),
-        initialValue = emptyList()
-    )
+    val folders: StateFlow<List<FolderSummary>> =
+        combine(repository.allFolders, repository.cardCountsPerFolder) { folderEntities, counts ->
+            folderEntities.map { entity ->
+                FolderSummary(
+                    id = entity.id,
+                    name = entity.name,
+                    cardCount = counts[entity.id] ?: 0,
+                    includeInSync = entity.includeInSync,
+                    updatedAtFormatted = dateFormat.format(Date(entity.updatedAt))
+                )
+            }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
 
     // Current Folder Cards
     val currentCards: StateFlow<List<CardSummary>> = _selectedFolderId.flatMapLatest { folderId ->
@@ -248,6 +282,7 @@ class OlloViewModel(application: Application) : AndroidViewModel(application) {
                         refreshGlassesInfo()
                     } else if (state == GlassesConnectionState.DISCONNECTED && transport === getActiveTransport()) {
                         _glassesStorage.value = null
+                        if (transport === androidBleTransport) startAutoReconnect()
                     }
                 }
             }
@@ -353,6 +388,10 @@ class OlloViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setAutoReconnect(enabled: Boolean) {
         _autoReconnect.value = enabled
+        if (enabled && !_useSimulatedGlasses.value &&
+            androidBleTransport.connectionState.value == GlassesConnectionState.DISCONNECTED) {
+            startAutoReconnect()
+        }
     }
 
     fun setUseSimulatedGlasses(enabled: Boolean) {

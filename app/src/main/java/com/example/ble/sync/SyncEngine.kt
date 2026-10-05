@@ -52,6 +52,11 @@ class SyncEngine(
 
     private var syncJob: Job? = null
 
+    private companion object {
+        /** END_SYNC makes the glasses rewrite flash, so allow much longer than a normal ACK. */
+        const val END_SYNC_TIMEOUT_MS = 12_000L
+    }
+
     fun cancelSync() {
         syncJob?.cancel()
         _syncState.value = SyncState.Idle
@@ -200,42 +205,72 @@ class SyncEngine(
         _syncState.value = SyncState.Finalizing
         onProgress?.invoke(0.95f, "Finalizing sync on glasses...")
 
-        coroutineScope {
-            // Listen for automatic STORAGE_INFO in parallel before ending sync
-            val storageDeferred = async {
-                withTimeoutOrNull(3000L) {
-                    transport.notifications
-                        .filter { it is IncomingPacket.StorageInfo }
-                        .first() as IncomingPacket.StorageInfo
+        val finalizeResult = finalizeSync(transport)
+        if (finalizeResult == null) {
+            _syncState.value = SyncState.Failed("Failed to finalize sync", "END_SYNC")
+            return
+        }
+
+        // Step 10: Automatic STORAGE_INFO (may be absent if the glasses only sent the status)
+        finalizeResult.storage?.let {
+            _freeStorageBytes.value = it.freeBytes
+            _totalStorageBytes.value = it.totalBytes
+        }
+
+        onProgress?.invoke(1.0f, "Sync complete!")
+        _syncState.value = SyncState.Success(
+            cardsSynced = cardCount,
+            imagesSynced = totalImages,
+            freeBytesOnGlasses = _freeStorageBytes.value ?: storageInfo.freeBytes
+        )
+    }
+
+    private data class FinalizeResult(val storage: IncomingPacket.StorageInfo?)
+
+    /**
+     * Sends END_SYNC and waits for the glasses to confirm.
+     *
+     * The glasses swap the deck and clean up flash *before* replying, which can take longer than a
+     * normal ACK. The old code timed out after 3 s, re-sent END_SYNC, and the glasses (which had
+     * already finished) answered ERROR -> "Failed to finalize sync" even though the sync worked.
+     *
+     * Now: wait up to [END_SYNC_TIMEOUT_MS] and accept either STATUS(END_SYNC)=OK or the automatic
+     * STORAGE_INFO that the glasses only send after a successful END_SYNC. END_SYNC is re-sent only
+     * if nothing at all came back.
+     */
+    private suspend fun finalizeSync(transport: GlassesTransport): FinalizeResult? {
+        for (attempt in 1..2) {
+            val reply = withTimeoutOrNull(END_SYNC_TIMEOUT_MS) {
+                coroutineScope {
+                    val deferred = async {
+                        transport.notifications
+                            .filter {
+                                (it is IncomingPacket.Status && it.refType == PacketTypes.END_SYNC) ||
+                                    it is IncomingPacket.StorageInfo
+                            }
+                            .first()
+                    }
+                    val sent = transport.sendPacket(PacketBuilder.buildEndSync())
+                    if (!sent) null else deferred.await()
                 }
             }
 
-            val endSyncSuccess = executeWithRetries(
-                stepName = "END_SYNC",
-                transport = transport,
-                packetToSend = PacketBuilder.buildEndSync(),
-                expectedRefType = PacketTypes.END_SYNC
-            )
-            if (!endSyncSuccess) {
-                storageDeferred.cancel()
-                _syncState.value = SyncState.Failed("Failed to finalize sync", "END_SYNC")
-                return@coroutineScope
+            when (reply) {
+                is IncomingPacket.StorageInfo -> return FinalizeResult(reply)
+                is IncomingPacket.Status -> {
+                    if (!reply.isOk) return null
+                    // STORAGE_INFO follows right behind the status; give it a moment
+                    val storage = withTimeoutOrNull(1500L) {
+                        transport.notifications
+                            .filter { it is IncomingPacket.StorageInfo }
+                            .first() as IncomingPacket.StorageInfo
+                    }
+                    return FinalizeResult(storage)
+                }
+                else -> delay(300) // timeout or send failure: try once more
             }
-
-            // Step 10: Automatic STORAGE_INFO received
-            val finalStorage = storageDeferred.await()
-            if (finalStorage != null) {
-                _freeStorageBytes.value = finalStorage.freeBytes
-                _totalStorageBytes.value = finalStorage.totalBytes
-            }
-
-            onProgress?.invoke(1.0f, "Sync complete!")
-            _syncState.value = SyncState.Success(
-                cardsSynced = cardCount,
-                imagesSynced = totalImages,
-                freeBytesOnGlasses = _freeStorageBytes.value ?: storageInfo.freeBytes
-            )
         }
+        return null
     }
 
     private suspend fun queryInfoWithTimeout(transport: GlassesTransport, timeoutMs: Long): IncomingPacket.Info? {

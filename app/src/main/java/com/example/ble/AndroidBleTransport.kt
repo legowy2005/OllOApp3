@@ -29,6 +29,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.min
 
@@ -77,6 +79,14 @@ class AndroidBleTransport(
     /** Completed when the link is fully usable (services found + notifications enabled). */
     private var readyDeferred: CompletableDeferred<Boolean>? = null
     private var scanTimeoutJob: Job? = null
+
+    /** Only one connect attempt at a time (auto-reconnect and manual connect must not overlap). */
+    private val connectMutex = Mutex()
+
+    /** True after the user explicitly disconnected; auto-reconnect must respect that. */
+    @Volatile
+    var userRequestedDisconnect: Boolean = false
+        private set
 
     var lastAddress: String?
         get() = prefs.getString("last_address", null)
@@ -302,32 +312,42 @@ class AndroidBleTransport(
      * Connects and only returns true once the link is really usable.
      * addressOrId == null -> use the last connected device, otherwise scan for an "Ollo" device.
      */
-    override suspend fun connect(addressOrId: String?): Boolean {
+    override suspend fun connect(addressOrId: String?): Boolean = connectMutex.withLock {
         if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled || !hasPermissions()) {
             onPacketLogged?.invoke("BLE", "CONNECT_BLOCKED", "", "Bluetooth is off or permission missing")
-            return false
+            return@withLock false
         }
-        if (_connectionState.value == GlassesConnectionState.CONNECTED) return true
+        userRequestedDisconnect = false
+        if (_connectionState.value == GlassesConnectionState.CONNECTED) return@withLock true
 
         _connectionState.value = GlassesConnectionState.CONNECTING
         stopScan()
 
-        val address = addressOrId ?: lastAddress ?: findOlloAddress()
-        if (address == null) {
-            onPacketLogged?.invoke("BLE", "NOT_FOUND", "", "No Ollo glasses found nearby")
-            _connectionState.value = GlassesConnectionState.DISCONNECTED
-            return false
+        // 1) Try the explicit / last known address (Android often fails the first try with status 133)
+        val knownAddress = addressOrId ?: lastAddress
+        if (knownAddress != null) {
+            for (attempt in 1..2) {
+                if (userRequestedDisconnect) break
+                if (connectOnce(knownAddress)) return@withLock true
+                cleanGatt()
+                delay(400)
+            }
         }
 
-        // Android often fails the first attempt with status 133; one clean retry fixes most cases.
-        for (attempt in 1..2) {
-            val ok = connectOnce(address)
-            if (ok) return true
-            cleanGatt()
-            delay(400)
+        // 2) Not reachable at that address (or none saved): scan for an Ollo device and try it
+        if (addressOrId == null && !userRequestedDisconnect) {
+            val found = findOlloAddress()
+            if (found == null) {
+                onPacketLogged?.invoke("BLE", "NOT_FOUND", "", "No Ollo glasses found nearby")
+            } else if (found != knownAddress || knownAddress == null) {
+                if (connectOnce(found)) return@withLock true
+                cleanGatt()
+            }
         }
+
+        cleanGatt()
         _connectionState.value = GlassesConnectionState.DISCONNECTED
-        return false
+        false
     }
 
     private suspend fun connectOnce(address: String): Boolean {
@@ -342,7 +362,7 @@ class AndroidBleTransport(
             } else {
                 device.connectGatt(context, false, gattCallback)
             }
-            withTimeoutOrNull(12_000L) { deferred.await() } == true
+            withTimeoutOrNull(10_000L) { deferred.await() } == true
         } catch (e: Exception) {
             e.printStackTrace()
             false
@@ -350,6 +370,7 @@ class AndroidBleTransport(
     }
 
     override suspend fun disconnect() {
+        userRequestedDisconnect = true
         stopScan()
         bluetoothGatt?.disconnect()
         delay(100)

@@ -279,7 +279,7 @@ fun OlloAppNavigation(
 
             is OlloDestination.Sync -> {
                 val includedFolders = folders.filter { it.includeInSync }
-                val totalCards = currentCards.size
+                val totalCards = includedFolders.sumOf { it.cardCount }
 
                 SyncScreen(
                     isConnected = isConnected,
