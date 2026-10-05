@@ -24,7 +24,6 @@ class OlloRepository(
 
     val allFolders: Flow<List<FolderEntity>> = folderDao.getAllFolders()
 
-    /** Map of folderId -> number of cards, kept live by Room. Folders with no cards are absent. */
     val cardCountsPerFolder: Flow<Map<Long, Int>> =
         cardDao.getCardCountsPerFolder().map { rows -> rows.associate { it.folderId to it.cardCount } }
 
@@ -96,7 +95,6 @@ class OlloRepository(
                 backImageId = backImageId
             )
         )
-        // Update folder updated_at timestamp
         val folder = folderDao.getFolderById(folderId)
         if (folder != null) {
             folderDao.updateFolder(folder.copy(updatedAt = System.currentTimeMillis()))
@@ -165,18 +163,24 @@ class OlloRepository(
         cardDao.getCardsToSync()
     }
 
+    /** Cards to sync with their folder names resolved in one database read. */
+    suspend fun getCardsToSyncWithFolders(): List<CardWithFolderName> = withContext(Dispatchers.IO) {
+        val folders = folderDao.getAllFoldersOnce().associateBy { it.id }
+        cardDao.getCardsToSync().map { card ->
+            CardWithFolderName(
+                card = card,
+                folderName = folders[card.folderId]?.name ?: "OllO"
+            )
+        }
+    }
+
     suspend fun getImagesForSync(imageIds: List<Long>): List<ImageEntity> = withContext(Dispatchers.IO) {
         if (imageIds.isEmpty()) emptyList()
         else imageDao.getImagesByIds(imageIds)
     }
 
-    /**
-     * Export folder's cards as CSV format: front,back
-     */
     suspend fun exportFolderCsv(folderId: Long): String = withContext(Dispatchers.IO) {
         val stringBuilder = StringBuilder()
-        val folder = folderDao.getFolderById(folderId)
-        // Header
         stringBuilder.append("front,back\n")
         val cards = cardDao.getCardsToSync().filter { it.folderId == folderId }
         for (card in cards) {
@@ -187,10 +191,11 @@ class OlloRepository(
         stringBuilder.toString()
     }
 
-    /**
-     * Import CSV into destination folder (or create new folder named after the file).
-     */
-    suspend fun importCsv(folderName: String, csvContent: String, existingFolderId: Long? = null): Long = withContext(Dispatchers.IO) {
+    suspend fun importCsv(
+        folderName: String,
+        csvContent: String,
+        existingFolderId: Long? = null
+    ): Long = withContext(Dispatchers.IO) {
         val targetFolderId = existingFolderId ?: addFolder(folderName)
         val lines = csvContent.lines()
         var isFirst = true
@@ -200,7 +205,6 @@ class OlloRepository(
             val trimmed = line.trim()
             if (trimmed.isEmpty()) continue
 
-            // Skip header if present
             if (isFirst && (trimmed.equals("front,back", ignoreCase = true) || trimmed.startsWith("front,"))) {
                 isFirst = false
                 continue
@@ -225,10 +229,8 @@ class OlloRepository(
     }
 
     /**
-     * Section 8 Offline estimate:
-     * per card about 20 + frontBytes + backBytes bytes;
-     * per unique image 4 + dataLen, rounded up to the next 4,096 bytes (small-file filesystem blocks).
-     * Count only cards that would be synced.
+     * Offline storage estimate. Images now have a 5-byte on-flash header
+     * (width + height + format) and RGB565 images can be 2 bytes/pixel.
      */
     suspend fun calculateOfflineEstimate(): Long = withContext(Dispatchers.IO) {
         val cardsToSync = cardDao.getCardsToSync()
@@ -238,7 +240,7 @@ class OlloRepository(
         for (card in cardsToSync) {
             val fBytes = card.frontText.toByteArray(Charsets.US_ASCII).size
             val bBytes = card.backText.toByteArray(Charsets.US_ASCII).size
-            totalBytes += (20 + fBytes + bBytes)
+            totalBytes += (21 + fBytes + bBytes) // 13-byte card payload + file/line overhead estimate
 
             card.frontImageId?.let { if (it > 0) uniqueImageIds.add(it) }
             card.backImageId?.let { if (it > 0) uniqueImageIds.add(it) }
@@ -247,7 +249,7 @@ class OlloRepository(
         if (uniqueImageIds.isNotEmpty()) {
             val images = imageDao.getImagesByIds(uniqueImageIds.toList())
             for (img in images) {
-                val rawSize = 4 + img.deviceData.size
+                val rawSize = 5 + img.deviceData.size
                 val blockRounded = ((rawSize + 4095) / 4096) * 4096L
                 totalBytes += blockRounded
             }
@@ -272,9 +274,9 @@ class OlloRepository(
 
         while (i < line.length) {
             val c = line[i]
-            if (c == '\"') {
-                if (inQuotes && i + 1 < line.length && line[i + 1] == '\"') {
-                    currentField.append('\"')
+            if (c == '"') {
+                if (inQuotes && i + 1 < line.length && line[i + 1] == '"') {
+                    currentField.append('"')
                     i++
                 } else {
                     inQuotes = !inQuotes

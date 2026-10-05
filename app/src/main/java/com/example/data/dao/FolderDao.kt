@@ -13,6 +13,9 @@ interface FolderDao {
     @Query("SELECT * FROM folders ORDER BY sort_order ASC, created_at ASC")
     fun getAllFolders(): Flow<List<FolderEntity>>
 
+    @Query("SELECT * FROM folders ORDER BY sort_order ASC, created_at ASC")
+    suspend fun getAllFoldersOnce(): List<FolderEntity>
+
     @Query("SELECT * FROM folders WHERE id = :id LIMIT 1")
     suspend fun getFolderById(id: Long): FolderEntity?
 

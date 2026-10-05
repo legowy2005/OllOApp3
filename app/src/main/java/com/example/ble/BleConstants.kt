@@ -3,34 +3,24 @@ package com.example.ble
 import java.util.UUID
 
 object BleConstants {
-    // Advertised BLE peripheral name (Protocol constant)
     const val ADVERTISED_NAME: String = "Ollo"
 
-    // Primary Service UUID: 6f6c6c6f-0001-4000-8000-00805f9b34fb
     val SERVICE_UUID: UUID = UUID.fromString("6f6c6c6f-0001-4000-8000-00805f9b34fb")
-
-    // Write characteristic: 6f6c6c6f-0002-4000-8000-00805f9b34fb (Write Without Response only)
     val WRITE_CHAR_UUID: UUID = UUID.fromString("6f6c6c6f-0002-4000-8000-00805f9b34fb")
-
-    // Notify characteristic: 6f6c6c6f-0003-4000-8000-00805f9b34fb (Notify)
     val NOTIFY_CHAR_UUID: UUID = UUID.fromString("6f6c6c6f-0003-4000-8000-00805f9b34fb")
-
-    // GATT Client Characteristic Configuration Descriptor (for enabling notifications)
     val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
-    // Protocol constraints
     const val MAX_WRITE_BYTES: Int = 240
+    const val MAX_FOLDER_NAME_BYTES: Int = 20
     const val ACK_TIMEOUT_MS: Long = 3000L
     const val GET_INFO_TIMEOUT_MS: Long = 1500L
     const val CHUNK_PACING_DELAY_MS: Long = 12L
     const val IMG_BEGIN_SETTLE_DELAY_MS: Long = 100L
 
-    // Default simulated flash size (~1.4 MB)
     const val DEFAULT_FLASH_TOTAL_BYTES: Long = 1_441_792L
 }
 
 object PacketTypes {
-    // App to glasses
     const val BEGIN_SYNC: Byte = 0x01
     const val CARD: Byte = 0x02
     const val IMG_BEGIN: Byte = 0x03
@@ -40,12 +30,10 @@ object PacketTypes {
     const val GET_STORAGE: Byte = 0x07
     const val GET_INFO: Byte = 0x08
 
-    // Glasses to app
     const val NOTIFY_STATUS: Byte = 0x80.toByte()
     const val NOTIFY_STORAGE_INFO: Byte = 0x81.toByte()
     const val NOTIFY_INFO: Byte = 0x82.toByte()
 
-    // STATUS Codes
     const val STATUS_OK: Int = 0
     const val STATUS_ERROR: Int = 1
     const val STATUS_ALREADY_HAVE_IMAGE: Int = 2

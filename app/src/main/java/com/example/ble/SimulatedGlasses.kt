@@ -33,24 +33,21 @@ class SimulatedGlasses(
     private val _rssi = MutableStateFlow<Int?>(-55)
     override val rssi: StateFlow<Int?> = _rssi.asStateFlow()
 
-    // Persistent storage state on simulated glasses (ESP32-S3 flash)
-    private var activeDeck = mutableListOf<SimulatedCard>()
-    private val storedImages = mutableMapOf<Long, ByteArray>() // id -> bytes
-    private var usedFlashBytes: Long = 12_288L // Initial deck storage sample
+    private val activeDeck = mutableListOf<SimulatedCard>()
+    private val storedImages = mutableMapOf<Long, ByteArray>()
+    private var usedFlashBytes: Long = 12_288L
 
-    // In-flight sync state
     private var isSyncInProgress = false
     private var expectedCardCount = 0
-    private var stagingDeck = mutableListOf<SimulatedCard>()
+    private val stagingDeck = mutableListOf<SimulatedCard>()
 
-    // In-flight image state
     private var currentImageId: Long? = null
     private var currentImageWidth: Int = 0
     private var currentImageHeight: Int = 0
+    private var currentImageFormat: Int = 0
     private var currentImageDataLen: Long = 0L
-    private var currentImageReceivedBytes = mutableListOf<Byte>()
+    private val currentImageReceivedBytes = mutableListOf<Byte>()
 
-    // Fault injection hooks (Section 9)
     var dropNextAck: Boolean = false
     var corruptNextChunk: Boolean = false
     var autoDisconnectJob: Job? = null
@@ -59,6 +56,7 @@ class SimulatedGlasses(
         val index: Int,
         val frontImgId: Long,
         val backImgId: Long,
+        val folderName: String,
         val frontText: String,
         val backText: String
     )
@@ -83,9 +81,7 @@ class SimulatedGlasses(
         onPacketLogged?.invoke("SIM", "DISCONNECTED", "", "Disconnected from simulated glasses")
     }
 
-    override fun getMaxPayloadSize(): Int {
-        return BleConstants.MAX_WRITE_BYTES
-    }
+    override fun getMaxPayloadSize(): Int = BleConstants.MAX_WRITE_BYTES
 
     fun trigger5SecondDisconnect() {
         autoDisconnectJob?.cancel()
@@ -96,15 +92,12 @@ class SimulatedGlasses(
     }
 
     override suspend fun sendPacket(packet: ByteArray): Boolean {
-        if (_connectionState.value != GlassesConnectionState.CONNECTED) return false
-        if (packet.isEmpty()) return false
+        if (_connectionState.value != GlassesConnectionState.CONNECTED || packet.isEmpty()) return false
 
         val type = packet[0]
         val hex = PacketBuilder.toHexString(packet)
-        val name = PacketTypes.getPacketName(type)
-        onPacketLogged?.invoke("APP -> GLASSES", name, hex, "")
+        onPacketLogged?.invoke("APP -> GLASSES", PacketTypes.getPacketName(type), hex, "")
 
-        // Handle packets according to Section 5.5 rules
         when (type) {
             PacketTypes.BEGIN_SYNC -> handleBeginSync(packet)
             PacketTypes.CARD -> handleCard(packet)
@@ -125,15 +118,10 @@ class SimulatedGlasses(
             emitStatus(PacketTypes.BEGIN_SYNC, PacketTypes.STATUS_ERROR)
             return
         }
+
         val buffer = ByteBuffer.wrap(packet, 1, 2).order(ByteOrder.LITTLE_ENDIAN)
         val cardCount = buffer.getShort().toInt() and 0xFFFF
 
-        if (cardCount > 65535) {
-            emitStatus(PacketTypes.BEGIN_SYNC, PacketTypes.STATUS_ERROR)
-            return
-        }
-
-        // Rule 5.5: Starting a new BEGIN_SYNC discards any sync in progress
         isSyncInProgress = true
         expectedCardCount = cardCount
         stagingDeck.clear()
@@ -149,60 +137,107 @@ class SimulatedGlasses(
             return
         }
 
-        val buffer = ByteBuffer.wrap(packet, 1, packet.size - 1).order(ByteOrder.LITTLE_ENDIAN)
-        val index = buffer.getShort().toInt() and 0xFFFF
-        val frontImgId = buffer.getInt().toLong() and 0xFFFFFFFFL
-        val backImgId = buffer.getInt().toLong() and 0xFFFFFFFFL
-        val frontLen = buffer.get().toInt() and 0xFF
-        val backLen = buffer.get().toInt() and 0xFF
+        val payload = ByteBuffer.wrap(packet, 1, packet.size - 1).order(ByteOrder.LITTLE_ENDIAN)
+        val index = payload.getShort().toInt() and 0xFFFF
+        val frontImgId = payload.getInt().toLong() and 0xFFFFFFFFL
+        val backImgId = payload.getInt().toLong() and 0xFFFFFFFFL
 
-        // Rule 5.5: index < cardCount, frontLen <= 100, backLen <= 100
-        // Payload must be exactly 12 + frontLen + backLen bytes
+        val remainingPayload = packet.size - 1
+        val folderLenCandidate = payload.get().toInt() and 0xFF
+
+        // New format has 13 bytes of fixed payload metadata.
+        val looksNew = remainingPayload >= 13
+        if (looksNew) {
+            val frontLen = payload.get().toInt() and 0xFF
+            val backLen = payload.get().toInt() and 0xFF
+            val expectedPayloadSize = 13 + folderLenCandidate + frontLen + backLen
+
+            if (folderLenCandidate <= BleConstants.MAX_FOLDER_NAME_BYTES &&
+                frontLen <= DeviceLimits.maxTextBytes &&
+                backLen <= DeviceLimits.maxTextBytes &&
+                index < expectedCardCount &&
+                remainingPayload == expectedPayloadSize
+            ) {
+                val folderBytes = ByteArray(folderLenCandidate)
+                payload.get(folderBytes)
+                val frontBytes = ByteArray(frontLen)
+                payload.get(frontBytes)
+                val backBytes = ByteArray(backLen)
+                payload.get(backBytes)
+
+                val folder = String(folderBytes, Charsets.US_ASCII).ifBlank { "OllO" }
+                val front = String(frontBytes, Charsets.US_ASCII)
+                val back = String(backBytes, Charsets.US_ASCII)
+
+                stagingDeck.add(SimulatedCard(index, frontImgId, backImgId, folder, front, back))
+                emitStatus(PacketTypes.CARD, PacketTypes.STATUS_OK)
+                return
+            }
+        }
+
+        // Backward-compatible v1 card packet.
+        val legacyPayload = ByteBuffer.wrap(packet, 1, packet.size - 1).order(ByteOrder.LITTLE_ENDIAN)
+        legacyPayload.position(10)
+        val frontLen = legacyPayload.get().toInt() and 0xFF
+        val backLen = legacyPayload.get().toInt() and 0xFF
         val expectedPayloadSize = 12 + frontLen + backLen
-        if (index >= expectedCardCount || frontLen > 100 || backLen > 100 || (packet.size - 1) != expectedPayloadSize) {
+
+        if (index >= expectedCardCount ||
+            frontLen > DeviceLimits.maxTextBytes ||
+            backLen > DeviceLimits.maxTextBytes ||
+            remainingPayload != expectedPayloadSize
+        ) {
             emitStatus(PacketTypes.CARD, PacketTypes.STATUS_ERROR)
             return
         }
 
         val frontBytes = ByteArray(frontLen)
-        buffer.get(frontBytes)
+        legacyPayload.get(frontBytes)
         val backBytes = ByteArray(backLen)
-        buffer.get(backBytes)
+        legacyPayload.get(backBytes)
 
-        val frontText = String(frontBytes, Charsets.US_ASCII)
-        val backText = String(backBytes, Charsets.US_ASCII)
-
-        stagingDeck.add(SimulatedCard(index, frontImgId, backImgId, frontText, backText))
+        stagingDeck.add(
+            SimulatedCard(
+                index,
+                frontImgId,
+                backImgId,
+                "OllO",
+                String(frontBytes, Charsets.US_ASCII),
+                String(backBytes, Charsets.US_ASCII)
+            )
+        )
         emitStatus(PacketTypes.CARD, PacketTypes.STATUS_OK)
     }
 
     private suspend fun handleImgBegin(packet: ByteArray) {
-        if (!isSyncInProgress || packet.size != 13) {
+        if (!isSyncInProgress || (packet.size != 13 && packet.size != 14)) {
             emitStatus(PacketTypes.IMG_BEGIN, PacketTypes.STATUS_ERROR)
             return
         }
 
-        val buffer = ByteBuffer.wrap(packet, 1, 12).order(ByteOrder.LITTLE_ENDIAN)
+        val buffer = ByteBuffer.wrap(packet, 1, packet.size - 1).order(ByteOrder.LITTLE_ENDIAN)
         val id = buffer.getInt().toLong() and 0xFFFFFFFFL
         val width = buffer.getShort().toInt() and 0xFFFF
         val height = buffer.getShort().toInt() and 0xFFFF
         val dataLen = buffer.getInt().toLong() and 0xFFFFFFFFL
+        val format = if (packet.size == 14) buffer.get().toInt() and 0xFF else 0
 
-        val expectedDataLen = (((width + 7) / 8) * height).toLong()
+        val valid = when (format) {
+            0 -> width in 1..640 && height in 1..480 && dataLen == (((width + 7) / 8) * height).toLong() && dataLen <= 38_400L
+            1 -> width in 1..320 && height in 1..240 && dataLen == width.toLong() * height.toLong() * 2L && dataLen <= 153_600L
+            else -> false
+        }
 
-        // Rule 5.5: id != 0; 1 <= width <= 320; 1 <= height <= 240; dataLen == ((width + 7) / 8) * height; dataLen <= 10240; enough space
-        if (id == 0L || width !in 1..640 || height !in 1..480 || dataLen != expectedDataLen || dataLen > 38400) {
+        if (id == 0L || !valid) {
             emitStatus(PacketTypes.IMG_BEGIN, PacketTypes.STATUS_ERROR)
             return
         }
 
-        // Check if flash has space
-        if (usedFlashBytes + dataLen > flashTotalBytes) {
+        if (usedFlashBytes + dataLen + 5 > flashTotalBytes) {
             emitStatus(PacketTypes.IMG_BEGIN, PacketTypes.STATUS_STORAGE_FULL)
             return
         }
 
-        // Rule 5.4 / 5.5: If id is already stored, glasses answer status 2 (ALREADY_HAVE_IMAGE)
         if (storedImages.containsKey(id)) {
             emitStatus(PacketTypes.IMG_BEGIN, PacketTypes.STATUS_ALREADY_HAVE_IMAGE)
             return
@@ -211,6 +246,7 @@ class SimulatedGlasses(
         currentImageId = id
         currentImageWidth = width
         currentImageHeight = height
+        currentImageFormat = format
         currentImageDataLen = dataLen
         currentImageReceivedBytes.clear()
 
@@ -218,18 +254,14 @@ class SimulatedGlasses(
     }
 
     private fun handleImgChunk(packet: ByteArray) {
-        // IMG_CHUNK is never acknowledged
-        if (!isSyncInProgress || currentImageId == null || packet.size < 5) {
+        if (!isSyncInProgress || currentImageId == null || packet.size < 5)
             return
-        }
 
         val buffer = ByteBuffer.wrap(packet, 1, 4).order(ByteOrder.LITTLE_ENDIAN)
         val offset = buffer.getInt().toLong() and 0xFFFFFFFFL
         val chunkLen = packet.size - 5
 
-        // Rule 5.5: offset must equal number of bytes received so far; total must not exceed dataLen
-        if (offset != currentImageReceivedBytes.size.toLong() || (offset + chunkLen) > currentImageDataLen) {
-            // Bad chunk: silently abandon image
+        if (offset != currentImageReceivedBytes.size.toLong() || offset + chunkLen > currentImageDataLen) {
             currentImageId = null
             currentImageReceivedBytes.clear()
             return
@@ -237,13 +269,12 @@ class SimulatedGlasses(
 
         if (corruptNextChunk) {
             corruptNextChunk = false
-            currentImageReceivedBytes.add(0xFF.toByte()) // introduce deliberate byte corruption
+            currentImageReceivedBytes.add(0xFF.toByte())
             return
         }
 
-        for (i in 5 until packet.size) {
+        for (i in 5 until packet.size)
             currentImageReceivedBytes.add(packet[i])
-        }
     }
 
     private suspend fun handleImgEnd(packet: ByteArray) {
@@ -253,17 +284,14 @@ class SimulatedGlasses(
         }
 
         val reportedChecksum = packet[1].toInt() and 0xFF
-
-        // Rule 5.5: total received must equal dataLen; checksum = (sum of all pixel data bytes) mod 256
         if (currentImageReceivedBytes.size.toLong() != currentImageDataLen) {
             emitStatus(PacketTypes.IMG_END, PacketTypes.STATUS_ERROR)
             return
         }
 
         var sum = 0
-        for (b in currentImageReceivedBytes) {
-            sum += (b.toInt() and 0xFF)
-        }
+        for (b in currentImageReceivedBytes)
+            sum += b.toInt() and 0xFF
         val computedChecksum = sum and 0xFF
 
         if (computedChecksum != reportedChecksum) {
@@ -271,11 +299,9 @@ class SimulatedGlasses(
             return
         }
 
-        // Successfully received image
         val id = currentImageId!!
-        val bytes = currentImageReceivedBytes.toByteArray()
-        storedImages[id] = bytes
-        usedFlashBytes += bytes.size
+        storedImages[id] = currentImageReceivedBytes.toByteArray()
+        usedFlashBytes += currentImageReceivedBytes.size + 5L
 
         currentImageId = null
         currentImageReceivedBytes.clear()
@@ -289,56 +315,54 @@ class SimulatedGlasses(
             return
         }
 
-        // Rule 5.5: number of CARD packets received must equal cardCount
         if (stagingDeck.size != expectedCardCount) {
             emitStatus(PacketTypes.END_SYNC, PacketTypes.STATUS_ERROR)
             return
         }
 
-        // Atomic deck replacement!
         activeDeck.clear()
         activeDeck.addAll(stagingDeck)
         stagingDeck.clear()
         isSyncInProgress = false
 
-        // Delete images no card references
         val referencedImageIds = mutableSetOf<Long>()
         for (card in activeDeck) {
             if (card.frontImgId > 0) referencedImageIds.add(card.frontImgId)
             if (card.backImgId > 0) referencedImageIds.add(card.backImgId)
         }
-        val unreferenced = storedImages.keys.filter { !referencedImageIds.contains(it) }
-        for (unrefId in unreferenced) {
-            val removedBytes = storedImages.remove(unrefId)
-            if (removedBytes != null) {
-                usedFlashBytes = (usedFlashBytes - removedBytes.size).coerceAtLeast(0L)
-            }
+
+        val unreferenced = storedImages.keys.filter { it !in referencedImageIds }
+        for (id in unreferenced) {
+            val removed = storedImages.remove(id)
+            if (removed != null)
+                usedFlashBytes = (usedFlashBytes - removed.size - 5L).coerceAtLeast(0L)
         }
 
-        // Rule 5.5: send STATUS OK, then send STORAGE_INFO
         emitStatus(PacketTypes.END_SYNC, PacketTypes.STATUS_OK)
         delay(50)
         emitStorageInfo()
     }
 
-    private suspend fun handleGetStorage() {
-        emitStorageInfo()
-    }
+    private suspend fun handleGetStorage() = emitStorageInfo()
 
     private suspend fun handleGetInfo() {
         val infoPacket = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN).apply {
             put(PacketTypes.NOTIFY_INFO)
-            put(1.toByte()) // protocolVersion: 1
-            putShort(640.toShort()) // maxWidth: 640
-            putShort(480.toShort()) // maxHeight: 480
-            putInt(38400) // maxImageBytes: 38400
-            put(100.toByte()) // maxTextBytes: 100
-            put(0.toByte()) // flags: bit0 color (not yet)
+            put(2.toByte())
+            putShort(640.toShort())
+            putShort(480.toShort())
+            putInt(153600)
+            put(100.toByte())
+            put(0x01.toByte())
         }.array()
 
         val parsed = PacketParser.parse(infoPacket)
-        val hex = PacketBuilder.toHexString(infoPacket)
-        onPacketLogged?.invoke("GLASSES -> APP", "INFO (0x82)", hex, "Firmware v1, 640x480, 38400 img, 100 txt")
+        onPacketLogged?.invoke(
+            "GLASSES -> APP",
+            "INFO (0x82)",
+            PacketBuilder.toHexString(infoPacket),
+            "Firmware v2, RGB565 supported, 640x480 mono / 320x240 color"
+        )
         _notifications.emit(parsed)
     }
 
@@ -351,7 +375,6 @@ class SimulatedGlasses(
 
         val statusPacket = byteArrayOf(PacketTypes.NOTIFY_STATUS, refType, status.toByte())
         val parsed = PacketParser.parse(statusPacket)
-        val hex = PacketBuilder.toHexString(statusPacket)
         val statusDesc = when (status) {
             PacketTypes.STATUS_OK -> "OK (0)"
             PacketTypes.STATUS_ERROR -> "ERROR (1)"
@@ -359,7 +382,12 @@ class SimulatedGlasses(
             PacketTypes.STATUS_STORAGE_FULL -> "STORAGE_FULL (3)"
             else -> "$status"
         }
-        onPacketLogged?.invoke("GLASSES -> APP", "STATUS (0x80)", hex, "ref: 0x%02X -> $statusDesc".format(refType))
+        onPacketLogged?.invoke(
+            "GLASSES -> APP",
+            "STATUS (0x80)",
+            PacketBuilder.toHexString(statusPacket),
+            "ref: 0x%02X -> $statusDesc".format(refType)
+        )
         _notifications.emit(parsed)
     }
 
@@ -371,8 +399,12 @@ class SimulatedGlasses(
         }.array()
 
         val parsed = PacketParser.parse(storagePacket)
-        val hex = PacketBuilder.toHexString(storagePacket)
-        onPacketLogged?.invoke("GLASSES -> APP", "STORAGE_INFO (0x81)", hex, "Total: ${flashTotalBytes}B, Used: ${usedFlashBytes}B")
+        onPacketLogged?.invoke(
+            "GLASSES -> APP",
+            "STORAGE_INFO (0x81)",
+            PacketBuilder.toHexString(storagePacket),
+            "Total: ${flashTotalBytes}B, Used: ${usedFlashBytes}B"
+        )
         _notifications.emit(parsed)
     }
 }

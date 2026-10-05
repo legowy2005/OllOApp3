@@ -8,7 +8,6 @@ import com.example.ble.PacketBuilder
 import com.example.ble.PacketTypes
 import com.example.core.AsciiTransliteration
 import com.example.core.DeviceLimits
-import com.example.data.entity.CardEntity
 import com.example.data.entity.ImageEntity
 import com.example.data.repository.OlloRepository
 import kotlinx.coroutines.CoroutineScope
@@ -53,7 +52,6 @@ class SyncEngine(
     private var syncJob: Job? = null
 
     private companion object {
-        /** END_SYNC makes the glasses rewrite flash, so allow much longer than a normal ACK. */
         const val END_SYNC_TIMEOUT_MS = 12_000L
     }
 
@@ -67,7 +65,6 @@ class SyncEngine(
         onProgress: ((Float, String) -> Unit)? = null
     ) {
         if (syncJob?.isActive == true) return
-
         syncJob = scope.launch {
             runSyncSequence(transport, onProgress)
         }
@@ -77,18 +74,15 @@ class SyncEngine(
         transport: GlassesTransport,
         onProgress: ((Float, String) -> Unit)?
     ) {
-        // Step 1: Connect and prepare
         if (transport.connectionState.value != GlassesConnectionState.CONNECTED) {
             _syncState.value = SyncState.Connecting
             onProgress?.invoke(0.05f, "Connecting to glasses...")
-            val connected = transport.connect()
-            if (!connected) {
+            if (!transport.connect()) {
                 _syncState.value = SyncState.Failed("Could not connect to glasses", "Connection")
                 return
             }
         }
 
-        // Step 2: (Optional) Send GET_INFO; wait up to 1.5s for INFO
         _syncState.value = SyncState.CheckingInfo
         onProgress?.invoke(0.1f, "Querying glasses firmware capabilities...")
         val infoPacket = queryInfoWithTimeout(transport, BleConstants.GET_INFO_TIMEOUT_MS)
@@ -102,7 +96,6 @@ class SyncEngine(
             )
         }
 
-        // Step 3: Send GET_STORAGE; wait for STORAGE_INFO
         _syncState.value = SyncState.CheckingStorage
         onProgress?.invoke(0.15f, "Checking glasses storage...")
         val storageInfo = queryStorageWithRetries(transport)
@@ -113,7 +106,6 @@ class SyncEngine(
         _totalStorageBytes.value = storageInfo.totalBytes
         _freeStorageBytes.value = storageInfo.freeBytes
 
-        // Step 4: Check if synced deck fits device
         val neededBytes = repository.calculateOfflineEstimate()
         if (neededBytes > storageInfo.freeBytes) {
             val neededKb = (neededBytes + 1023) / 1024
@@ -123,20 +115,19 @@ class SyncEngine(
             return
         }
 
-        // Step 5: Collect cards from folders with include_in_sync = true
-        val cardsToSync = repository.getCardsToSync()
-        val cardCount = cardsToSync.size
+        // Resolve folder names once and keep the same order as the card transfer.
+        val cardsWithFolders = repository.getCardsToSyncWithFolders()
+        val cardCount = cardsWithFolders.size
 
-        // Collect unique image ids
         val imageIds = mutableSetOf<Long>()
-        for (c in cardsToSync) {
-            c.frontImageId?.let { if (it > 0) imageIds.add(it) }
-            c.backImageId?.let { if (it > 0) imageIds.add(it) }
+        for (item in cardsWithFolders) {
+            val card = item.card
+            card.frontImageId?.let { if (it > 0) imageIds.add(it) }
+            card.backImageId?.let { if (it > 0) imageIds.add(it) }
         }
         val imagesToSync = repository.getImagesForSync(imageIds.toList())
         val imageMap = imagesToSync.associateBy { it.id }
 
-        // Step 6: Send BEGIN_SYNC with cardCount = N
         val beginSyncSuccess = executeWithRetries(
             stepName = "BEGIN_SYNC",
             transport = transport,
@@ -148,11 +139,17 @@ class SyncEngine(
             return
         }
 
-        // Step 7: Send cards in order, index 0..N-1
         for (index in 0 until cardCount) {
-            val card = cardsToSync[index]
+            val item = cardsWithFolders[index]
+            val card = item.card
             val frontClean = AsciiTransliteration.sanitizeForGlasses(card.frontText).cleanText
             val backClean = AsciiTransliteration.sanitizeForGlasses(card.backText).cleanText
+            val folderClean = AsciiTransliteration
+                .sanitizeForGlasses(item.folderName)
+                .cleanText
+                .take(BleConstants.MAX_FOLDER_NAME_BYTES)
+                .ifBlank { "OllO" }
+
             val frontImgId = card.frontImageId ?: 0L
             val backImgId = card.backImageId ?: 0L
 
@@ -165,7 +162,8 @@ class SyncEngine(
                 frontImgId = frontImgId,
                 backImgId = backImgId,
                 frontText = frontClean,
-                backText = backClean
+                backText = backClean,
+                folderName = folderClean
             )
 
             val cardSuccess = executeWithRetries(
@@ -180,7 +178,6 @@ class SyncEngine(
             }
         }
 
-        // Step 8: Send images
         var imagesSent = 0
         val totalImages = imageIds.size
         for (imgId in imageIds) {
@@ -196,12 +193,16 @@ class SyncEngine(
                 _syncState.value = SyncState.SendingImages(imagesSent, totalImages, offset, total)
             }
             if (!transferSuccess) {
-                _syncState.value = SyncState.Failed("Image transfer timed out at image $imagesSent", "Image Transfer")
+                val message = if (image.format != 0 && !DeviceLimits.supportsColor) {
+                    "Color image $imagesSent cannot be sent: this glasses firmware does not support RGB565"
+                } else {
+                    "Image transfer failed at image $imagesSent"
+                }
+                _syncState.value = SyncState.Failed(message, "Image Transfer", canRetry = false)
                 return
             }
         }
 
-        // Step 9: Send END_SYNC
         _syncState.value = SyncState.Finalizing
         onProgress?.invoke(0.95f, "Finalizing sync on glasses...")
 
@@ -211,7 +212,6 @@ class SyncEngine(
             return
         }
 
-        // Step 10: Automatic STORAGE_INFO (may be absent if the glasses only sent the status)
         finalizeResult.storage?.let {
             _freeStorageBytes.value = it.freeBytes
             _totalStorageBytes.value = it.totalBytes
@@ -227,17 +227,6 @@ class SyncEngine(
 
     private data class FinalizeResult(val storage: IncomingPacket.StorageInfo?)
 
-    /**
-     * Sends END_SYNC and waits for the glasses to confirm.
-     *
-     * The glasses swap the deck and clean up flash *before* replying, which can take longer than a
-     * normal ACK. The old code timed out after 3 s, re-sent END_SYNC, and the glasses (which had
-     * already finished) answered ERROR -> "Failed to finalize sync" even though the sync worked.
-     *
-     * Now: wait up to [END_SYNC_TIMEOUT_MS] and accept either STATUS(END_SYNC)=OK or the automatic
-     * STORAGE_INFO that the glasses only send after a successful END_SYNC. END_SYNC is re-sent only
-     * if nothing at all came back.
-     */
     private suspend fun finalizeSync(transport: GlassesTransport): FinalizeResult? {
         for (attempt in 1..2) {
             val reply = withTimeoutOrNull(END_SYNC_TIMEOUT_MS) {
@@ -259,7 +248,6 @@ class SyncEngine(
                 is IncomingPacket.StorageInfo -> return FinalizeResult(reply)
                 is IncomingPacket.Status -> {
                     if (!reply.isOk) return null
-                    // STORAGE_INFO follows right behind the status; give it a moment
                     val storage = withTimeoutOrNull(1500L) {
                         transport.notifications
                             .filter { it is IncomingPacket.StorageInfo }
@@ -267,13 +255,16 @@ class SyncEngine(
                     }
                     return FinalizeResult(storage)
                 }
-                else -> delay(300) // timeout or send failure: try once more
+                else -> delay(300)
             }
         }
         return null
     }
 
-    private suspend fun queryInfoWithTimeout(transport: GlassesTransport, timeoutMs: Long): IncomingPacket.Info? {
+    private suspend fun queryInfoWithTimeout(
+        transport: GlassesTransport,
+        timeoutMs: Long
+    ): IncomingPacket.Info? {
         return withTimeoutOrNull(timeoutMs) {
             coroutineScope {
                 val deferred = async {
@@ -281,8 +272,8 @@ class SyncEngine(
                         .filter { it is IncomingPacket.Info }
                         .first() as IncomingPacket.Info
                 }
-                transport.sendPacket(PacketBuilder.buildGetInfo())
-                deferred.await()
+                val sent = transport.sendPacket(PacketBuilder.buildGetInfo())
+                if (!sent) null else deferred.await()
             }
         }
     }
@@ -326,9 +317,9 @@ class SyncEngine(
                 }
             }
 
-            if (status != null && status.isOk) {
+            if (status != null && status.isOk)
                 return true
-            }
+
             delay(100)
         }
         return false
@@ -339,6 +330,9 @@ class SyncEngine(
         image: ImageEntity,
         onChunkProgress: (Long, Long) -> Unit
     ): Boolean {
+        if (image.format != 0 && !DeviceLimits.supportsColor)
+            return false
+
         for (attempt in 1..3) {
             val beginPacket = PacketBuilder.buildImgBegin(
                 id = image.id,
@@ -360,42 +354,35 @@ class SyncEngine(
                 }
             } ?: continue
 
-            // Deduplication: If glasses already have image, skip chunks!
-            if (beginStatus.isAlreadyHaveImage) {
+            if (beginStatus.isAlreadyHaveImage)
                 return true
-            }
 
             if (!beginStatus.isOk) {
-                // Glasses firmware can't take color yet: skip this image, keep syncing the rest.
-                if (image.format != 0) return true
                 delay(100)
                 continue
             }
 
-            // Wait 100 ms to let glasses prepare flash buffer
             delay(BleConstants.IMG_BEGIN_SETTLE_DELAY_MS)
 
-            // Slice into chunks of max payload (maxWriteBytes - 5)
-            val maxChunkBytes = transport.getMaxPayloadSize() - 5
+            val maxChunkBytes = (transport.getMaxPayloadSize() - 5).coerceAtLeast(1)
             val data = image.deviceData
             var offset = 0
 
             while (offset < data.size) {
                 val chunkSize = minOf(maxChunkBytes, data.size - offset)
                 val chunkPacket = PacketBuilder.buildImgChunk(offset.toLong(), data, offset, chunkSize)
-                transport.sendPacket(chunkPacket)
+                if (!transport.sendPacket(chunkPacket)) {
+                    return false
+                }
+
                 offset += chunkSize
                 onChunkProgress(offset.toLong(), data.size.toLong())
-
-                // 12 ms chunk pacing (Section 5.7)
                 delay(BleConstants.CHUNK_PACING_DELAY_MS)
             }
 
-            // Checksum = (sum of all pixel data bytes) mod 256
             var sum = 0
-            for (b in data) {
+            for (b in data)
                 sum += (b.toInt() and 0xFF)
-            }
             val checksum = sum and 0xFF
 
             val endStatus = withTimeoutOrNull(BleConstants.ACK_TIMEOUT_MS) {
@@ -410,9 +397,8 @@ class SyncEngine(
                 }
             }
 
-            if (endStatus != null && endStatus.isOk) {
+            if (endStatus != null && endStatus.isOk)
                 return true
-            }
 
             delay(100)
         }
