@@ -10,6 +10,7 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
@@ -368,9 +369,23 @@ class AndroidBleTransport(
         onPacketLogged?.invoke("APP -> GLASSES", PacketTypes.getPacketName(toSend[0]), PacketBuilder.toHexString(toSend), "")
 
         // Write-without-response can report "busy" if the stack is still flushing; retry briefly.
-        repeat(6) {
+        repeat(6) { attempt ->
             val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                gatt.writeCharacteristic(char, toSend, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) == BluetoothGatt.GATT_SUCCESS
+                // Android 13+ returns a BluetoothStatusCodes value, not the legacy GATT callback status.
+                val result = gatt.writeCharacteristic(
+                    char,
+                    toSend,
+                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                )
+                if (result != BluetoothStatusCodes.SUCCESS) {
+                    onPacketLogged?.invoke(
+                        "BLE",
+                        "WRITE_RETRY",
+                        PacketBuilder.toHexString(toSend),
+                        "Write failed on attempt \${attempt + 1}/6 with status $result"
+                    )
+                }
+                result == BluetoothStatusCodes.SUCCESS
             } else {
                 @Suppress("DEPRECATION")
                 char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
