@@ -55,6 +55,7 @@ object ImageProcessor {
      * memory while still being much higher resolution than the glasses output.
      */
     private const val PHOTO_DECODE_MAX_W = 2048
+    private const val FORCE_FULL_CANVAS = true
     private const val PHOTO_DECODE_MAX_H = 2048
 
     fun decodeSampledBitmapFromUri(
@@ -278,14 +279,15 @@ object ImageProcessor {
         isColorMode: Boolean = false,
         backgroundColorArgb: Int = AndroidColor.WHITE
     ): ProcessedImageResult {
-        val clampedTargetW = targetWidth.coerceIn(
-            DeviceLimits.EDITOR_MIN_W,
-            DeviceLimits.EDITOR_MAX_W
-        )
-        val clampedTargetH = targetHeight.coerceIn(
-            DeviceLimits.EDITOR_MIN_H,
-            DeviceLimits.EDITOR_MAX_H
-        )
+        /*
+         * Always render onto the full device canvas (640x480). The ESP32 scales any
+         * smaller image with nearest-neighbour, which breaks thin strokes in
+         * already-binarized text. The size sliders/presets no longer shrink the output.
+         */
+        val clampedTargetW = if (FORCE_FULL_CANVAS) DeviceLimits.deviceMaxW
+            else targetWidth.coerceIn(DeviceLimits.EDITOR_MIN_W, DeviceLimits.EDITOR_MAX_W)
+        val clampedTargetH = if (FORCE_FULL_CANVAS) DeviceLimits.deviceMaxH
+            else targetHeight.coerceIn(DeviceLimits.EDITOR_MIN_H, DeviceLimits.EDITOR_MAX_H)
 
         val transformed = applyUserTransforms(
             sourceBitmap = sourceBitmap,
@@ -469,8 +471,24 @@ object ImageProcessor {
             // 1. High-resolution RGB/RGBA -> grayscale.
             Imgproc.cvtColor(srcRgba, gray, Imgproc.COLOR_RGBA2GRAY)
 
-            // 2. Local contrast enhancement (excellent for shadows and uneven lighting).
-            clahe.apply(gray, enhanced)
+            // 2a. Flatten uneven lighting: divide by an estimate of the paper background.
+            //     (dilate removes dark text from the estimate, median smooths it)
+            val bg = Mat()
+            val flat = Mat()
+            try {
+                Imgproc.dilate(
+                    gray, bg,
+                    Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(9.0, 9.0))
+                )
+                Imgproc.medianBlur(bg, bg, 31)
+                Core.divide(gray, bg, flat, 255.0)
+
+                // 2b. Gentle local contrast enhancement on the flattened image.
+                clahe.apply(flat, enhanced)
+            } finally {
+                bg.release()
+                flat.release()
+            }
 
             // 3. Noise reduction before the final resize.
             // A 5x5 median is much better at suppressing camera/screen speckle
@@ -494,8 +512,10 @@ object ImageProcessor {
                 invert = invert
             )
 
-            // 6. Remove tiny black specks without aggressively altering characters.
-            removeBlackSpecks(binary, cleaned)
+            // 6. (removed) The old 2x2 morphological opening deleted every 1-px stroke,
+            //    which shredded text into dashes at 640x480. Noise is already handled
+            //    by the median blur above, so just pass the binary image through.
+            binary.copyTo(cleaned)
 
             // 7. Pack directly into OllO's 1-bit MSB-left format.
             return packBinaryMat(cleaned)
@@ -544,7 +564,7 @@ object ImageProcessor {
                 Size(scaledW.toDouble(), scaledH.toDouble()),
                 0.0,
                 0.0,
-                Imgproc.INTER_LANCZOS4
+                Imgproc.INTER_AREA   // area averaging is the correct filter for large downscales
             )
 
             val x0 = (canvasWidth - scaledW) / 2

@@ -109,8 +109,8 @@ fun ImageEditorScreen(
     }
 
     // Resolution selection (supports 320x240 up to 640x480 as requested)
-    var selectedWidth by remember { mutableIntStateOf(320) }
-    var selectedHeight by remember { mutableIntStateOf(240) }
+    var selectedWidth by remember { mutableIntStateOf(640) }
+    var selectedHeight by remember { mutableIntStateOf(480) }
     var isAspectLocked by remember { mutableStateOf(true) }
 
     // Transformations
