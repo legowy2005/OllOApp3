@@ -59,7 +59,7 @@ object ImageProcessor {
     private const val PHOTO_DECODE_MAX_W = 2048
     private const val FORCE_FULL_CANVAS = false
 
-    /** Send 4-level gray (format 2) instead of 1-bit. Needs the 2-bit glasses firmware. */
+    /** Default for the editor's 1-bit / 2-bit choice. 2-bit needs the 2-bit glasses firmware. */
     private const val USE_GRAY2 = true
     private const val PHOTO_DECODE_MAX_H = 2048
 
@@ -282,7 +282,8 @@ object ImageProcessor {
         threshold: Int = 128,
         invert: Boolean = false,
         isColorMode: Boolean = false,
-        backgroundColorArgb: Int = AndroidColor.WHITE
+        backgroundColorArgb: Int = AndroidColor.WHITE,
+        grayLevels: Boolean = USE_GRAY2
     ): ProcessedImageResult {
         /*
          * Always render onto the full device canvas (640x480). The ESP32 scales any
@@ -332,10 +333,10 @@ object ImageProcessor {
             thresholdControl = threshold,
             invert = invert,
             backgroundIsWhite = backgroundColorArgb != AndroidColor.BLACK,
-            gray2 = USE_GRAY2,
+            gray2 = grayLevels,
             dither = useDithering
         )
-        val outFormat = if (USE_GRAY2) 2 else 0
+        val outFormat = if (grayLevels) 2 else 0
 
         var checksumSum = 0
         for (b in packedBytes) {

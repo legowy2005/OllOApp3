@@ -121,6 +121,7 @@ fun ImageEditorScreen(
     var threshold by remember { mutableFloatStateOf(128f) }
     var isInverted by remember { mutableStateOf(false) }
     var isColorMode by remember { mutableStateOf(false) }
+    var useGray2 by remember { mutableStateOf(true) }   // 2-bit gray vs 1-bit B&W (ignored in color mode)
 
     // Cropping controls (normalized 0f to 1f)
     var showCropControls by remember { mutableStateOf(false) }
@@ -144,7 +145,8 @@ fun ImageEditorScreen(
         useDithering,
         threshold,
         isInverted,
-        isColorMode
+        isColorMode,
+        useGray2
     ) {
         derivedStateOf {
             ImageProcessor.processImage(
@@ -161,7 +163,8 @@ fun ImageEditorScreen(
                 useDithering = useDithering,
                 threshold = threshold.toInt(),
                 invert = isInverted,
-                isColorMode = isColorMode
+                isColorMode = isColorMode,
+                grayLevels = useGray2
             )
         }
     }
@@ -191,7 +194,7 @@ fun ImageEditorScreen(
             TopAppBar(
                 title = {
                     Text(
-                        text = "Image Editor",
+                        text = "Image Editor (2-bit build)",
                         style = MaterialTheme.typography.titleLarge,
                         color = colors.onBackground
                     )
@@ -254,7 +257,7 @@ fun ImageEditorScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Glasses Live Preview (1-bit OLED)",
+                    text = "Glasses Live Preview",
                     style = MaterialTheme.typography.titleMedium,
                     color = colors.onBackground
                 )
@@ -396,15 +399,24 @@ fun ImageEditorScreen(
                 }
             }
 
-            // Mode: Black and White vs Color
+            // Image depth: 1-bit B&W, 2-bit gray (4 levels), or experimental color
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 FilterChip(
-                    selected = !isColorMode,
-                    onClick = { isColorMode = false },
-                    label = { Text("Gray (2-bit)") },
+                    selected = !isColorMode && !useGray2,
+                    onClick = { isColorMode = false; useGray2 = false },
+                    label = { Text("1-bit") },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = colors.accentMuted,
+                        selectedLabelColor = colors.accent
+                    )
+                )
+                FilterChip(
+                    selected = !isColorMode && useGray2,
+                    onClick = { isColorMode = false; useGray2 = true },
+                    label = { Text("2-bit gray") },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = colors.accentMuted,
                         selectedLabelColor = colors.accent
@@ -413,7 +425,7 @@ fun ImageEditorScreen(
                 FilterChip(
                     selected = isColorMode,
                     onClick = { isColorMode = true },
-                    label = { Text("Color RGB565 (experimental)") },
+                    label = { Text("Color (exp.)") },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = colors.accentMuted,
                         selectedLabelColor = colors.accent
