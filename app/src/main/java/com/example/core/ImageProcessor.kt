@@ -7,10 +7,11 @@ import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.RectF
+import android.media.ExifInterface
 import android.net.Uri
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
-import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import kotlin.math.max
 import kotlin.math.min
@@ -39,6 +40,12 @@ object ImageProcessor {
         ResolutionPreset("640x480 (Max)", 640, 480)
     )
 
+    /**
+     * Decode an image and normalize the phone/camera EXIF orientation immediately.
+     *
+     * This fixes the common case where the JPEG's pixels are stored sideways while
+     * the camera relies on the EXIF orientation tag to tell viewers how to display it.
+     */
     fun decodeSampledBitmapFromUri(
         context: Context,
         uri: Uri,
@@ -46,25 +53,114 @@ object ImageProcessor {
         reqHeight: Int = DeviceLimits.EDITOR_MAX_H
     ): Bitmap? {
         return try {
+            val orientation = readExifOrientation(context, uri)
+
             val options = BitmapFactory.Options().apply {
                 inJustDecodeBounds = true
             }
-            var stream: InputStream? = context.contentResolver.openInputStream(uri)
-            BitmapFactory.decodeStream(stream, null, options)
-            stream?.close()
+
+            context.contentResolver.openInputStream(uri).use { stream ->
+                if (stream != null) {
+                    BitmapFactory.decodeStream(stream, null, options)
+                }
+            }
+
+            if (options.outWidth <= 0 || options.outHeight <= 0) {
+                return null
+            }
 
             options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight)
             options.inJustDecodeBounds = false
             options.inPreferredConfig = Bitmap.Config.ARGB_8888
 
-            stream = context.contentResolver.openInputStream(uri)
-            val bitmap = BitmapFactory.decodeStream(stream, null, options)
-            stream?.close()
-            bitmap
+            val decoded = context.contentResolver.openInputStream(uri).use { stream ->
+                if (stream != null) {
+                    BitmapFactory.decodeStream(stream, null, options)
+                } else {
+                    null
+                }
+            } ?: return null
+
+            applyExifOrientation(decoded, orientation)
         } catch (e: Exception) {
             e.printStackTrace()
             null
         }
+    }
+
+    private fun readExifOrientation(context: Context, uri: Uri): Int {
+        return try {
+            context.contentResolver.openInputStream(uri).use { stream ->
+                if (stream == null) {
+                    ExifInterface.ORIENTATION_NORMAL
+                } else {
+                    ExifInterface(stream).getAttributeInt(
+                        ExifInterface.TAG_ORIENTATION,
+                        ExifInterface.ORIENTATION_NORMAL
+                    )
+                }
+            }
+        } catch (_: Exception) {
+            ExifInterface.ORIENTATION_NORMAL
+        }
+    }
+
+    /**
+     * Handles the common camera orientations explicitly.
+     * The remaining mirror variants are also covered so the stored bitmap is upright.
+     */
+    private fun applyExifOrientation(bitmap: Bitmap, orientation: Int): Bitmap {
+        if (orientation == ExifInterface.ORIENTATION_NORMAL ||
+            orientation == ExifInterface.ORIENTATION_UNDEFINED
+        ) {
+            return bitmap
+        }
+
+        val matrix = Matrix()
+
+        when (orientation) {
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> {
+                matrix.setScale(-1f, 1f)
+            }
+
+            ExifInterface.ORIENTATION_ROTATE_180 -> {
+                matrix.setRotate(180f)
+            }
+
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> {
+                matrix.setScale(1f, -1f)
+            }
+
+            ExifInterface.ORIENTATION_TRANSPOSE -> {
+                matrix.setRotate(90f)
+                matrix.postScale(-1f, 1f)
+            }
+
+            ExifInterface.ORIENTATION_ROTATE_90 -> {
+                matrix.setRotate(90f)
+            }
+
+            ExifInterface.ORIENTATION_TRANSVERSE -> {
+                matrix.setRotate(-90f)
+                matrix.postScale(-1f, 1f)
+            }
+
+            ExifInterface.ORIENTATION_ROTATE_270 -> {
+                matrix.setRotate(-90f)
+            }
+
+            else -> return bitmap
+        }
+
+        return Bitmap.createBitmap(
+            bitmap,
+            0,
+            0,
+            bitmap.width,
+            bitmap.height,
+            matrix,
+            true
+        )
     }
 
     private fun calculateInSampleSize(
@@ -72,16 +168,22 @@ object ImageProcessor {
         reqWidth: Int,
         reqHeight: Int
     ): Int {
-        val (height: Int, width: Int) = options.outHeight to options.outWidth
+        val height = options.outHeight
+        val width = options.outWidth
         var inSampleSize = 1
 
         if (height > reqHeight || width > reqWidth) {
-            val halfHeight: Int = height / 2
-            val halfWidth: Int = width / 2
-            while (halfHeight / inSampleSize >= reqHeight && halfWidth / inSampleSize >= reqWidth) {
+            val halfHeight = height / 2
+            val halfWidth = width / 2
+
+            while (
+                halfHeight / inSampleSize >= reqHeight &&
+                halfWidth / inSampleSize >= reqWidth
+            ) {
                 inSampleSize *= 2
             }
         }
+
         return max(1, inSampleSize)
     }
 
@@ -123,26 +225,38 @@ object ImageProcessor {
     ): Bitmap {
         val left = (source.width * leftRatio.coerceIn(0f, 0.9f)).toInt()
         val top = (source.height * topRatio.coerceIn(0f, 0.9f)).toInt()
+
         val width = (source.width * (rightRatio - leftRatio).coerceIn(0.1f, 1f))
             .toInt()
             .coerceAtMost(source.width - left)
+
         val height = (source.height * (bottomRatio - topRatio).coerceIn(0.1f, 1f))
             .toInt()
             .coerceAtMost(source.height - top)
 
-        return Bitmap.createBitmap(source, left, top, max(1, width), max(1, height))
+        return Bitmap.createBitmap(
+            source,
+            left,
+            top,
+            max(1, width),
+            max(1, height)
+        )
     }
 
     /**
-     * Converts a source ARGB bitmap through the OllO image pipeline:
-     * - Rotate & flip
-     * - Crop
-     * - Composite transparency
-     * - Resize
-     * - Grayscale
-     * - 1-bit thresholding or Floyd-Steinberg dithering
-     * - Pack into row-major 1-bit bytes
+     * OllO's actual stored image format:
+     *   - black/white only
+     *   - 1 bit per pixel
+     *   - row-major
+     *   - MSB is the left-most pixel
+     *
+     * There is intentionally NO Floyd-Steinberg dithering in the device path.
+     * This avoids halftone noise and keeps text/strokes crisp.
+     *
+     * isColorMode is retained in the API for source compatibility with the current UI,
+     * but new images are always saved as 1-bit monochrome.
      */
+    @Suppress("UNUSED_PARAMETER")
     fun processImage(
         sourceBitmap: Bitmap,
         targetWidth: Int = 320,
@@ -154,21 +268,31 @@ object ImageProcessor {
         cropTopRatio: Float = 0f,
         cropRightRatio: Float = 1f,
         cropBottomRatio: Float = 1f,
-        useDithering: Boolean = true,
+        useDithering: Boolean = false,
         threshold: Int = 128,
         invert: Boolean = false,
         isColorMode: Boolean = false,
         backgroundColorArgb: Int = AndroidColor.WHITE
     ): ProcessedImageResult {
-        val clampedTargetW = targetWidth.coerceIn(DeviceLimits.EDITOR_MIN_W, DeviceLimits.EDITOR_MAX_W)
-        val clampedTargetH = targetHeight.coerceIn(DeviceLimits.EDITOR_MIN_H, DeviceLimits.EDITOR_MAX_H)
+        val clampedTargetW = targetWidth.coerceIn(
+            DeviceLimits.EDITOR_MIN_W,
+            DeviceLimits.EDITOR_MAX_W
+        )
+        val clampedTargetH = targetHeight.coerceIn(
+            DeviceLimits.EDITOR_MIN_H,
+            DeviceLimits.EDITOR_MAX_H
+        )
 
+        // User-controlled orientation transforms.
         val matrix = Matrix()
+
         if (rotationDegrees != 0f) {
             matrix.postRotate(rotationDegrees)
         }
+
         val sx = if (flipHorizontal) -1f else 1f
         val sy = if (flipVertical) -1f else 1f
+
         if (flipHorizontal || flipVertical) {
             matrix.postScale(sx, sy)
         }
@@ -200,24 +324,23 @@ object ImageProcessor {
             orientedBitmap
         }
 
-        val opaqueBitmap = Bitmap.createBitmap(
-            croppedBitmap.width,
-            croppedBitmap.height,
-            Bitmap.Config.ARGB_8888
-        )
-        val opaqueCanvas = Canvas(opaqueBitmap)
-        opaqueCanvas.drawColor(backgroundColorArgb)
-        opaqueCanvas.drawBitmap(croppedBitmap, 0f, 0f, null)
-
-        val displayBitmap = Bitmap.createScaledBitmap(
-            opaqueBitmap,
-            clampedTargetW,
-            clampedTargetH,
-            true
+        /*
+         * Preserve the source aspect ratio.
+         *
+         * The old path stretched every source to targetWidth x targetHeight.
+         * A phone photo can therefore be distorted even when the source itself
+         * is perfectly fine. The new path letterboxes onto a white canvas instead.
+         */
+        val displayBitmap = fitBitmapToCanvas(
+            source = croppedBitmap,
+            canvasWidth = clampedTargetW,
+            canvasHeight = clampedTargetH,
+            backgroundColorArgb = backgroundColorArgb
         )
 
-        val limitW = if (isColorMode) DeviceLimits.COLOR_MAX_W else DeviceLimits.deviceMaxW
-        val limitH = if (isColorMode) DeviceLimits.COLOR_MAX_H else DeviceLimits.deviceMaxH
+        val limitW = DeviceLimits.deviceMaxW
+        val limitH = DeviceLimits.deviceMaxH
+
         val (deviceW, deviceH) = calculateFitDimensions(
             clampedTargetW,
             clampedTargetH,
@@ -225,12 +348,19 @@ object ImageProcessor {
             limitH
         )
 
-        val deviceBitmap = Bitmap.createScaledBitmap(
-            displayBitmap,
-            deviceW,
-            deviceH,
-            true
-        )
+        val deviceBitmap = if (
+            deviceW == displayBitmap.width &&
+            deviceH == displayBitmap.height
+        ) {
+            displayBitmap
+        } else {
+            Bitmap.createScaledBitmap(
+                displayBitmap,
+                deviceW,
+                deviceH,
+                true
+            )
+        }
 
         val devicePixels = IntArray(deviceW * deviceH)
         deviceBitmap.getPixels(
@@ -243,19 +373,14 @@ object ImageProcessor {
             deviceH
         )
 
-        val packedBytes = if (isColorMode) {
-            packRgb565(devicePixels)
-        } else if (useDithering) {
-            floydSteinbergDither(devicePixels, deviceW, deviceH, invert)
-        } else {
-            adaptiveThreshold1Bit(
-                devicePixels,
-                deviceW,
-                deviceH,
-                threshold,
-                invert
-            )
-        }
+        // Always produce packed 1-bit data.
+        val packedBytes = threshold1Bit(
+            pixels = devicePixels,
+            width = deviceW,
+            height = deviceH,
+            threshold = threshold,
+            invert = invert
+        )
 
         var checksumSum = 0
         for (b in packedBytes) {
@@ -263,37 +388,151 @@ object ImageProcessor {
         }
         val checksum = checksumSum and 0xFF
 
-        val imageId = Crc32.calculateImageId(deviceW, deviceH, packedBytes)
-
-        val displayStream = ByteArrayOutputStream()
-        displayBitmap.compress(Bitmap.CompressFormat.PNG, 95, displayStream)
-        val displayBytes = displayStream.toByteArray()
+        val imageId = Crc32.calculateImageId(
+            deviceW,
+            deviceH,
+            packedBytes
+        )
 
         return ProcessedImageResult(
             imageId = imageId,
             deviceWidth = deviceW,
             deviceHeight = deviceH,
             deviceData = packedBytes,
-            displayWidth = clampedTargetW,
-            displayHeight = clampedTargetH,
-            displayData = displayBytes,
+            /*
+             * Keep the phone-side preview PNG for the existing UI.
+             * It is not sent to the glasses.
+             */
+            displayWidth = displayBitmap.width,
+            displayHeight = displayBitmap.height,
+            displayData = bitmapToPng(displayBitmap),
             checksum = checksum,
-            isColor = isColorMode
+            isColor = false
         )
     }
 
-    /** RGB565, little-endian, row-major, 2 bytes per pixel. */
+    /**
+     * Draw the image onto the selected canvas without changing its aspect ratio.
+     */
+    private fun fitBitmapToCanvas(
+        source: Bitmap,
+        canvasWidth: Int,
+        canvasHeight: Int,
+        backgroundColorArgb: Int
+    ): Bitmap {
+        val output = Bitmap.createBitmap(
+            canvasWidth,
+            canvasHeight,
+            Bitmap.Config.ARGB_8888
+        )
+
+        val canvas = Canvas(output)
+        canvas.drawColor(backgroundColorArgb)
+
+        val scale = min(
+            canvasWidth.toFloat() / source.width.toFloat(),
+            canvasHeight.toFloat() / source.height.toFloat()
+        )
+
+        val drawWidth = source.width * scale
+        val drawHeight = source.height * scale
+
+        val left = (canvasWidth - drawWidth) * 0.5f
+        val top = (canvasHeight - drawHeight) * 0.5f
+
+        val dest = RectF(
+            left,
+            top,
+            left + drawWidth,
+            top + drawHeight
+        )
+
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        canvas.drawBitmap(source, null, dest, paint)
+
+        return output
+    }
+
+    private fun bitmapToPng(bitmap: Bitmap): ByteArray {
+        val output = java.io.ByteArrayOutputStream()
+        bitmap.compress(
+            Bitmap.CompressFormat.PNG,
+            100,
+            output
+        )
+        return output.toByteArray()
+    }
+
+    /**
+     * Simple, deterministic B&W conversion.
+     *
+     * No dithering and no adaptive gray stage:
+     *   luma >= threshold -> white
+     *   luma <  threshold -> black
+     *
+     * That produces the exact 1-bit pixels that are stored in Room and later sent
+     * to the ESP32 without another image conversion step.
+     */
+    private fun threshold1Bit(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        threshold: Int,
+        invert: Boolean
+    ): ByteArray {
+        val rowBytes = (width + 7) / 8
+        val packed = ByteArray(rowBytes * height)
+        val cutoff = threshold.coerceIn(0, 255)
+
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val p = pixels[y * width + x]
+
+                val r = (p shr 16) and 0xFF
+                val g = (p shr 8) and 0xFF
+                val b = p and 0xFF
+
+                val luminance =
+                    (299 * r + 587 * g + 114 * b) / 1000
+
+                var white = luminance >= cutoff
+                if (invert) {
+                    white = !white
+                }
+
+                if (white) {
+                    val byteIndex = y * rowBytes + (x / 8)
+                    val bitOffset = 7 - (x % 8)
+                    packed[byteIndex] =
+                        (packed[byteIndex].toInt() or (1 shl bitOffset)).toByte()
+                }
+            }
+        }
+
+        return packed
+    }
+
+    /**
+     * Kept for compatibility with old callers/files. New processing never uses it.
+     */
     private fun packRgb565(pixels: IntArray): ByteArray {
         val out = ByteArray(pixels.size * 2)
+
         for (i in pixels.indices) {
             val p = pixels[i]
             val r = (p shr 16) and 0xFF
             val g = (p shr 8) and 0xFF
             val b = p and 0xFF
-            val v = ((r shr 3) shl 11) or ((g shr 2) shl 5) or (b shr 3)
+
+            val v =
+                ((r shr 3) shl 11) or
+                ((g shr 2) shl 5) or
+                (b shr 3)
+
             out[i * 2] = (v and 0xFF).toByte()
             out[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
         }
+
         return out
     }
 
@@ -309,24 +548,51 @@ object ImageProcessor {
             createRgb565PreviewBitmap(data, width, height)
         }
 
+    /**
+     * Legacy RGB565 preview support for already-stored images.
+     * New images are always format 0.
+     */
     fun createRgb565PreviewBitmap(
         data: ByteArray,
         width: Int,
         height: Int
     ): Bitmap {
         val argb = IntArray(width * height)
+
         for (i in argb.indices) {
             if (i * 2 + 1 >= data.size) break
+
             val v =
                 (data[i * 2].toInt() and 0xFF) or
-                        ((data[i * 2 + 1].toInt() and 0xFF) shl 8)
+                ((data[i * 2 + 1].toInt() and 0xFF) shl 8)
+
             val r = ((v shr 11) and 0x1F) * 255 / 31
             val g = ((v shr 5) and 0x3F) * 255 / 63
             val b = (v and 0x1F) * 255 / 31
-            argb[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+
+            argb[i] =
+                (0xFF shl 24) or
+                (r shl 16) or
+                (g shl 8) or
+                b
         }
-        val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        bmp.setPixels(argb, 0, width, 0, 0, width, height)
+
+        val bmp = Bitmap.createBitmap(
+            width,
+            height,
+            Bitmap.Config.ARGB_8888
+        )
+
+        bmp.setPixels(
+            argb,
+            0,
+            width,
+            0,
+            0,
+            width,
+            height
+        )
+
         return bmp
     }
 
@@ -336,252 +602,30 @@ object ImageProcessor {
         maxW: Int,
         maxH: Int
     ): Pair<Int, Int> {
-        if (w <= maxW && h <= maxH) return Pair(w, h)
+        if (w <= maxW && h <= maxH) {
+            return Pair(w, h)
+        }
+
         val ratioW = maxW.toFloat() / w.toFloat()
         val ratioH = maxH.toFloat() / h.toFloat()
         val scale = min(ratioW, ratioH)
-        val fitW = (w * scale).toInt().coerceIn(1, maxW)
-        val fitH = (h * scale).toInt().coerceIn(1, maxH)
+
+        val fitW = (w * scale)
+            .toInt()
+            .coerceIn(1, maxW)
+
+        val fitH = (h * scale)
+            .toInt()
+            .coerceIn(1, maxH)
+
         return Pair(fitW, fitH)
     }
 
     /**
-     * Adaptive thresholding for text/documents.
-     *
-     * Unlike a fixed 128 cutoff, the threshold follows local illumination.
-     * A small local-contrast boost is applied before classification, which
-     * helps thin text survive antialiasing and mild blur from rescaling.
-     *
-     * windowSize is odd and intentionally modest so this stays fast on mobile.
+     * Decode packed 1-bit data to an Android bitmap.
+     * Bit layout matches the ESP32/RP2040 protocol:
+     * MSB is the left-most pixel.
      */
-    private fun adaptiveThreshold1Bit(
-        pixels: IntArray,
-        width: Int,
-        height: Int,
-        globalThreshold: Int,
-        invert: Boolean
-    ): ByteArray {
-        val rowStride = width + 1
-        val integral = IntArray((height + 1) * rowStride)
-
-        // Convert to luma and build an integral image.
-        // The whole-frame integral safely fits in a signed Int at 640x480.
-        val gray = IntArray(width * height)
-
-        var globalSum = 0L
-        for (y in 0 until height) {
-            var rowSum = 0
-            val srcBase = y * width
-            val integralBase = (y + 1) * rowStride
-            val prevBase = y * rowStride
-
-            for (x in 0 until width) {
-                val p = pixels[srcBase + x]
-                val r = (p shr 16) and 0xFF
-                val g = (p shr 8) and 0xFF
-                val b = p and 0xFF
-
-                val luminance =
-                    (299 * r + 587 * g + 114 * b) / 1000
-
-                gray[srcBase + x] = luminance
-                rowSum += luminance
-                globalSum += luminance.toLong()
-
-                integral[integralBase + x + 1] =
-                    integral[prevBase + x + 1] + rowSum
-            }
-        }
-
-        val globalMean =
-            (globalSum / (width.toLong() * height.toLong()))
-                .toInt()
-
-        // 15x15 local window. Larger windows help with photos/scans;
-        // smaller windows preserve very small text but can become noisy.
-        val windowSize = 15
-        val radius = windowSize / 2
-
-        // Blend the requested global threshold into the adaptive result.
-        // The adaptive component is dominant, so shadows don't erase text.
-        val globalOffset = (globalThreshold - 128) / 4
-        val localC = 40 + globalOffset
-
-        val rowBytes = (width + 7) / 8
-        val packed = ByteArray(rowBytes * height)
-
-        for (y in 0 until height) {
-            val y0 = max(0, y - radius)
-            val y1 = min(height - 1, y + radius)
-
-            for (x in 0 until width) {
-                val x0 = max(0, x - radius)
-                val x1 = min(width - 1, x + radius)
-
-                val a = integral[y0 * rowStride + x0]
-                val b = integral[y0 * rowStride + (x1 + 1)]
-                val c = integral[(y1 + 1) * rowStride + x0]
-                val d = integral[(y1 + 1) * rowStride + (x1 + 1)]
-
-                val area = (x1 - x0 + 1) * (y1 - y0 + 1)
-                val localMean = (d - b - c + a) / area
-
-                val original = gray[y * width + x]
-
-                // Local contrast enhancement around the neighborhood mean.
-                val enhanced = original
-
-                // Compare against the local background rather than 128.
-                val cutoff = (localMean - localC).coerceIn(0, 255)
-
-                val isLit =
-                    if (!invert) {
-                        enhanced >= cutoff
-                    } else {
-                        enhanced < cutoff
-                    }
-
-                if (isLit) {
-                    val byteIdx = y * rowBytes + (x / 8)
-                    val bitOffset = 7 - (x % 8)
-                    packed[byteIdx] =
-                        (
-                                packed[byteIdx].toInt() or
-                                        (1 shl bitOffset)
-                                ).toByte()
-                }
-            }
-        }
-
-        // globalMean is deliberately computed to keep the adaptive pass aware
-        // of the overall image, but local thresholding remains the main signal.
-        @Suppress("UNUSED_VARIABLE")
-        val ignoredGlobalMean = globalMean
-
-        return packed
-    }
-
-    /**
-     * Luma -> percentile levels stretch -> mild unsharp mask.
-     * Gives the 1-bit stage full-contrast, crisp strokes instead of washed-out grays.
-     */
-    private fun prepareGray(pixels: IntArray, width: Int, height: Int): FloatArray {
-        val n = width * height
-        val gray = FloatArray(n)
-        val hist = IntArray(256)
-        for (i in 0 until n) {
-            val p = pixels[i]
-            val l = (0.299f * ((p shr 16) and 0xFF) +
-                    0.587f * ((p shr 8) and 0xFF) +
-                    0.114f * (p and 0xFF))
-            gray[i] = l
-            hist[l.toInt().coerceIn(0, 255)]++
-        }
-
-        // 2nd / 98th percentile stretch
-        var acc = 0
-        var lo = 0
-        var hi = 255
-        val loCount = n * 2 / 100
-        val hiCount = n * 98 / 100
-        var loSet = false
-        for (v in 0..255) {
-            acc += hist[v]
-            if (!loSet && acc >= loCount) { lo = v; loSet = true }
-            if (acc >= hiCount) { hi = v; break }
-        }
-        val range = max(1, hi - lo).toFloat()
-        for (i in 0 until n) {
-            gray[i] = ((gray[i] - lo) / range * 255f).coerceIn(0f, 255f)
-        }
-
-        // Unsharp mask: 3x3 binomial blur, amount 0.5
-        val blurred = FloatArray(n)
-        for (y in 0 until height) {
-            val ym = max(0, y - 1)
-            val yp = min(height - 1, y + 1)
-            for (x in 0 until width) {
-                val xm = max(0, x - 1)
-                val xp = min(width - 1, x + 1)
-                blurred[y * width + x] = (
-                        gray[ym * width + xm] + 2f * gray[ym * width + x] + gray[ym * width + xp] +
-                                2f * gray[y * width + xm] + 4f * gray[y * width + x] + 2f * gray[y * width + xp] +
-                                gray[yp * width + xm] + 2f * gray[yp * width + x] + gray[yp * width + xp]
-                        ) / 16f
-            }
-        }
-        val amount = 0.5f
-        for (i in 0 until n) {
-            gray[i] = (gray[i] + (gray[i] - blurred[i]) * amount).coerceIn(0f, 255f)
-        }
-        return gray
-    }
-
-    /** Floyd-Steinberg with serpentine scanning (avoids diagonal "worm" artifacts). */
-    private fun floydSteinbergDither(
-        pixels: IntArray,
-        width: Int,
-        height: Int,
-        invert: Boolean
-    ): ByteArray {
-        val gray = prepareGray(pixels, width, height)
-
-        val rowBytes = (width + 7) / 8
-        val packed = ByteArray(rowBytes * height)
-
-        for (y in 0 until height) {
-            val leftToRight = (y % 2 == 0)
-            val dir = if (leftToRight) 1 else -1
-            var x = if (leftToRight) 0 else width - 1
-            while (x in 0 until width) {
-                val idx = y * width + x
-                val oldVal = gray[idx].coerceIn(0f, 255f)
-                val newVal = if (oldVal >= 128f) 255f else 0f
-                val quantError = oldVal - newVal
-
-                val isLit =
-                    if (!invert) newVal == 255f else newVal == 0f
-
-                if (isLit) {
-                    val byteIdx = y * rowBytes + (x / 8)
-                    val bitOffset = 7 - (x % 8)
-                    packed[byteIdx] =
-                        (packed[byteIdx].toInt() or (1 shl bitOffset)).toByte()
-                }
-
-                val xn = x + dir
-                if (xn in 0 until width)
-                    gray[idx + dir] += quantError * (7f / 16f)
-                if (y + 1 < height) {
-                    val xb = x - dir
-                    if (xb in 0 until width)
-                        gray[idx + width - dir] += quantError * (3f / 16f)
-                    gray[idx + width] += quantError * (5f / 16f)
-                    if (xn in 0 until width)
-                        gray[idx + width + dir] += quantError * (1f / 16f)
-                }
-                x += dir
-            }
-        }
-
-        return packed
-    }
-
-    private fun threshold1Bit(
-        pixels: IntArray,
-        width: Int,
-        height: Int,
-        threshold: Int,
-        invert: Boolean
-    ): ByteArray =
-        adaptiveThreshold1Bit(
-            pixels,
-            width,
-            height,
-            threshold,
-            invert
-        )
-
     fun createOledPreviewBitmap(
         packedBytes: ByteArray,
         width: Int,
@@ -593,17 +637,27 @@ object ImageProcessor {
         for (y in 0 until height) {
             for (x in 0 until width) {
                 val byteIdx = y * rowBytes + (x / 8)
+
                 if (byteIdx < packedBytes.size) {
                     val bit =
                         (packedBytes[byteIdx].toInt() shr (7 - (x % 8))) and 1
+
                     argbPixels[y * width + x] =
-                        if (bit == 1) -0x1 else -0x1000000
+                        if (bit == 1) {
+                            -0x1
+                        } else {
+                            -0x1000000
+                        }
                 }
             }
         }
 
-        val bitmap =
-            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val bitmap = Bitmap.createBitmap(
+            width,
+            height,
+            Bitmap.Config.ARGB_8888
+        )
+
         bitmap.setPixels(
             argbPixels,
             0,
@@ -613,6 +667,7 @@ object ImageProcessor {
             width,
             height
         )
+
         return bitmap
     }
 
