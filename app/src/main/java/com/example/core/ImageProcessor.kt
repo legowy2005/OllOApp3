@@ -319,7 +319,7 @@ object ImageProcessor {
             if (i * 2 + 1 >= data.size) break
             val v =
                 (data[i * 2].toInt() and 0xFF) or
-                    ((data[i * 2 + 1].toInt() and 0xFF) shl 8)
+                        ((data[i * 2 + 1].toInt() and 0xFF) shl 8)
             val r = ((v shr 11) and 0x1F) * 255 / 31
             val g = ((v shr 5) and 0x3F) * 255 / 63
             val b = (v and 0x1F) * 255 / 31
@@ -405,7 +405,7 @@ object ImageProcessor {
         // Blend the requested global threshold into the adaptive result.
         // The adaptive component is dominant, so shadows don't erase text.
         val globalOffset = (globalThreshold - 128) / 4
-        val localC = 7 + globalOffset
+        val localC = 40 + globalOffset
 
         val rowBytes = (width + 7) / 8
         val packed = ByteArray(rowBytes * height)
@@ -429,9 +429,7 @@ object ImageProcessor {
                 val original = gray[y * width + x]
 
                 // Local contrast enhancement around the neighborhood mean.
-                val enhanced = (
-                    localMean + (original - localMean) * 1.35f
-                    ).toInt().coerceIn(0, 255)
+                val enhanced = original
 
                 // Compare against the local background rather than 128.
                 val cutoff = (localMean - localC).coerceIn(0, 255)
@@ -448,9 +446,9 @@ object ImageProcessor {
                     val bitOffset = 7 - (x % 8)
                     packed[byteIdx] =
                         (
-                            packed[byteIdx].toInt() or
-                                (1 shl bitOffset)
-                            ).toByte()
+                                packed[byteIdx].toInt() or
+                                        (1 shl bitOffset)
+                                ).toByte()
                 }
             }
         }
@@ -463,26 +461,79 @@ object ImageProcessor {
         return packed
     }
 
+    /**
+     * Luma -> percentile levels stretch -> mild unsharp mask.
+     * Gives the 1-bit stage full-contrast, crisp strokes instead of washed-out grays.
+     */
+    private fun prepareGray(pixels: IntArray, width: Int, height: Int): FloatArray {
+        val n = width * height
+        val gray = FloatArray(n)
+        val hist = IntArray(256)
+        for (i in 0 until n) {
+            val p = pixels[i]
+            val l = (0.299f * ((p shr 16) and 0xFF) +
+                    0.587f * ((p shr 8) and 0xFF) +
+                    0.114f * (p and 0xFF))
+            gray[i] = l
+            hist[l.toInt().coerceIn(0, 255)]++
+        }
+
+        // 2nd / 98th percentile stretch
+        var acc = 0
+        var lo = 0
+        var hi = 255
+        val loCount = n * 2 / 100
+        val hiCount = n * 98 / 100
+        var loSet = false
+        for (v in 0..255) {
+            acc += hist[v]
+            if (!loSet && acc >= loCount) { lo = v; loSet = true }
+            if (acc >= hiCount) { hi = v; break }
+        }
+        val range = max(1, hi - lo).toFloat()
+        for (i in 0 until n) {
+            gray[i] = ((gray[i] - lo) / range * 255f).coerceIn(0f, 255f)
+        }
+
+        // Unsharp mask: 3x3 binomial blur, amount 0.5
+        val blurred = FloatArray(n)
+        for (y in 0 until height) {
+            val ym = max(0, y - 1)
+            val yp = min(height - 1, y + 1)
+            for (x in 0 until width) {
+                val xm = max(0, x - 1)
+                val xp = min(width - 1, x + 1)
+                blurred[y * width + x] = (
+                        gray[ym * width + xm] + 2f * gray[ym * width + x] + gray[ym * width + xp] +
+                                2f * gray[y * width + xm] + 4f * gray[y * width + x] + 2f * gray[y * width + xp] +
+                                gray[yp * width + xm] + 2f * gray[yp * width + x] + gray[yp * width + xp]
+                        ) / 16f
+            }
+        }
+        val amount = 0.5f
+        for (i in 0 until n) {
+            gray[i] = (gray[i] + (gray[i] - blurred[i]) * amount).coerceIn(0f, 255f)
+        }
+        return gray
+    }
+
+    /** Floyd-Steinberg with serpentine scanning (avoids diagonal "worm" artifacts). */
     private fun floydSteinbergDither(
         pixels: IntArray,
         width: Int,
         height: Int,
         invert: Boolean
     ): ByteArray {
-        val gray = FloatArray(width * height)
-        for (i in pixels.indices) {
-            val p = pixels[i]
-            val r = (p shr 16) and 0xFF
-            val g = (p shr 8) and 0xFF
-            val b = p and 0xFF
-            gray[i] = (0.299f * r + 0.587f * g + 0.114f * b)
-        }
+        val gray = prepareGray(pixels, width, height)
 
         val rowBytes = (width + 7) / 8
         val packed = ByteArray(rowBytes * height)
 
         for (y in 0 until height) {
-            for (x in 0 until width) {
+            val leftToRight = (y % 2 == 0)
+            val dir = if (leftToRight) 1 else -1
+            var x = if (leftToRight) 0 else width - 1
+            while (x in 0 until width) {
                 val idx = y * width + x
                 val oldVal = gray[idx].coerceIn(0f, 255f)
                 val newVal = if (oldVal >= 128f) 255f else 0f
@@ -495,20 +546,21 @@ object ImageProcessor {
                     val byteIdx = y * rowBytes + (x / 8)
                     val bitOffset = 7 - (x % 8)
                     packed[byteIdx] =
-                        (
-                            packed[byteIdx].toInt() or
-                                (1 shl bitOffset)
-                            ).toByte()
+                        (packed[byteIdx].toInt() or (1 shl bitOffset)).toByte()
                 }
 
-                if (x + 1 < width)
-                    gray[idx + 1] += quantError * (7f / 16f)
-                if (x - 1 >= 0 && y + 1 < height)
-                    gray[idx + width - 1] += quantError * (3f / 16f)
-                if (y + 1 < height)
+                val xn = x + dir
+                if (xn in 0 until width)
+                    gray[idx + dir] += quantError * (7f / 16f)
+                if (y + 1 < height) {
+                    val xb = x - dir
+                    if (xb in 0 until width)
+                        gray[idx + width - dir] += quantError * (3f / 16f)
                     gray[idx + width] += quantError * (5f / 16f)
-                if (x + 1 < width && y + 1 < height)
-                    gray[idx + width + 1] += quantError * (1f / 16f)
+                    if (xn in 0 until width)
+                        gray[idx + width + dir] += quantError * (1f / 16f)
+                }
+                x += dir
             }
         }
 
