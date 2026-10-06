@@ -117,7 +117,7 @@ fun ImageEditorScreen(
     var rotationDegrees by remember { mutableFloatStateOf(0f) }
     var flipHorizontal by remember { mutableStateOf(false) }
     var flipVertical by remember { mutableStateOf(false) }
-    var useDithering by remember { mutableStateOf(true) }
+    var useDithering by remember { mutableStateOf(false) }
     var threshold by remember { mutableFloatStateOf(128f) }
     var isInverted by remember { mutableStateOf(false) }
     var isColorMode by remember { mutableStateOf(false) }
@@ -173,7 +173,7 @@ fun ImageEditorScreen(
                 processedResult.deviceData,
                 processedResult.deviceWidth,
                 processedResult.deviceHeight,
-                if (processedResult.isColor) 1 else 0
+                processedResult.format
             ).asImageBitmap()
         }
     }
@@ -300,7 +300,7 @@ fun ImageEditorScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "Glasses: ${processedResult.deviceWidth}x${processedResult.deviceHeight}, ${if (processedResult.isColor) "RGB565 color" else "1-bit"}",
+                        text = "Glasses: ${processedResult.deviceWidth}x${processedResult.deviceHeight}, ${when (processedResult.format) { 1 -> "RGB565 color"; 2 -> "2-bit gray"; else -> "1-bit" }}",
                         style = MaterialTheme.typography.labelMedium,
                         color = colors.textMuted
                     )
@@ -333,7 +333,7 @@ fun ImageEditorScreen(
                             modifier = Modifier.size(20.dp)
                         )
                         Text(
-                            text = "Target resolution (${selectedWidth}x${selectedHeight}) exceeds the limit for this mode (${if (isColorMode) "${DeviceLimits.COLOR_MAX_W}x${DeviceLimits.COLOR_MAX_H} color" else "${DeviceLimits.deviceMaxW}x${DeviceLimits.deviceMaxH} 1-bit"}). The glasses will receive a version scaled down to ${processedResult.deviceWidth}x${processedResult.deviceHeight} (aspect ratio preserved), while the phone stores the high-resolution copy.",
+                            text = "Target resolution (${selectedWidth}x${selectedHeight}) exceeds the limit for this mode (${if (isColorMode) "${DeviceLimits.COLOR_MAX_W}x${DeviceLimits.COLOR_MAX_H} color" else "${DeviceLimits.deviceMaxW}x${DeviceLimits.deviceMaxH} gray"}). The glasses will receive a version scaled down to ${processedResult.deviceWidth}x${processedResult.deviceHeight} (aspect ratio preserved), while the phone stores the high-resolution copy.",
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.warning
                         )
@@ -404,7 +404,7 @@ fun ImageEditorScreen(
                 FilterChip(
                     selected = !isColorMode,
                     onClick = { isColorMode = false },
-                    label = { Text("1-bit B&W") },
+                    label = { Text("Gray (2-bit)") },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = colors.accentMuted,
                         selectedLabelColor = colors.accent

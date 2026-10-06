@@ -24,19 +24,30 @@ object DeviceLimits {
     var maxImageBytes: Int = DEFAULT_MAX_IMAGE_BYTES
     var maxTextBytes: Int = DEFAULT_MAX_TEXT_BYTES
     var supportsColor: Boolean = false
+    var supportsGray2: Boolean = false
+
+    /** Image formats: 0 = 1-bit, 1 = RGB565 color, 2 = 2-bit gray. */
+    fun supportsImageFormat(format: Int): Boolean = when (format) {
+        0 -> true
+        1 -> supportsColor
+        2 -> supportsGray2
+        else -> false
+    }
 
     fun updateLimits(
         maxW: Int,
         maxH: Int,
         maxImgBytes: Long,
         maxTxtBytes: Int,
-        colorSupported: Boolean = false
+        colorSupported: Boolean = false,
+        gray2Supported: Boolean = false
     ) {
         deviceMaxW = maxW
         deviceMaxH = maxH
         maxImageBytes = maxImgBytes.toInt()
         maxTextBytes = maxTxtBytes
         supportsColor = colorSupported
+        supportsGray2 = gray2Supported
     }
 
     fun resetToDefaults() {
@@ -45,5 +56,6 @@ object DeviceLimits {
         maxImageBytes = DEFAULT_MAX_IMAGE_BYTES
         maxTextBytes = DEFAULT_MAX_TEXT_BYTES
         supportsColor = false
+        supportsGray2 = false
     }
 }

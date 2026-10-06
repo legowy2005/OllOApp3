@@ -191,7 +191,7 @@ class OlloViewModel(application: Application) : AndroidViewModel(application) {
         when (packet) {
             is IncomingPacket.StorageInfo -> _glassesStorage.value = packet.totalBytes to packet.usedBytes
             is IncomingPacket.Info -> {
-                DeviceLimits.updateLimits(packet.maxWidth, packet.maxHeight, packet.maxImageBytes, packet.maxTextBytes, packet.supportsColor)
+                DeviceLimits.updateLimits(packet.maxWidth, packet.maxHeight, packet.maxImageBytes, packet.maxTextBytes, packet.supportsColor, packet.supportsGray2)
                 _limitsVersion.value = _limitsVersion.value + 1
             }
             else -> {}
@@ -490,7 +490,7 @@ class OlloViewModel(application: Application) : AndroidViewModel(application) {
                     height = result.deviceHeight,
                     deviceData = result.deviceData,
                     displayData = result.displayData,
-                    format = if (result.isColor) 1 else 0
+                    format = if (result.isColor) 1 else result.format
                 )
             )
             refreshEstimate()

@@ -93,7 +93,8 @@ class SyncEngine(
                 maxH = infoPacket.maxHeight,
                 maxImgBytes = infoPacket.maxImageBytes,
                 maxTxtBytes = infoPacket.maxTextBytes,
-                colorSupported = infoPacket.supportsColor
+                colorSupported = infoPacket.supportsColor,
+                gray2Supported = infoPacket.supportsGray2
             )
         }
 
@@ -195,8 +196,12 @@ class SyncEngine(
                 _syncState.value = SyncState.SendingImages(imagesSent, totalImages, offset, total)
             }
             if (!transferSuccess) {
-                val message = if (image.format != 0 && !DeviceLimits.supportsColor) {
-                    "Color image $imagesSent cannot be sent: this glasses firmware does not support RGB565"
+                val message = if (!DeviceLimits.supportsImageFormat(image.format)) {
+                    if (image.format == 2) {
+                        "Image $imagesSent is 2-bit gray, but this glasses firmware does not support it yet - flash the newest firmware"
+                    } else {
+                        "Color image $imagesSent cannot be sent: this glasses firmware does not support RGB565"
+                    }
                 } else {
                     "Image transfer failed at image $imagesSent"
                 }
@@ -332,7 +337,7 @@ class SyncEngine(
         image: ImageEntity,
         onChunkProgress: (Long, Long) -> Unit
     ): Boolean {
-        if (image.format != 0 && !DeviceLimits.supportsColor)
+        if (!DeviceLimits.supportsImageFormat(image.format))
             return false
 
         for (attempt in 1..3) {

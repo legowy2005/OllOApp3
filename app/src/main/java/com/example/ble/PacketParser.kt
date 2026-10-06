@@ -38,6 +38,7 @@ sealed class IncomingPacket {
         val flags: Int = 0 // bit0 = glasses firmware accepts RGB565 color images
     ) : IncomingPacket() {
         val supportsColor: Boolean get() = (flags and 0x01) != 0
+        val supportsGray2: Boolean get() = (flags and 0x02) != 0
     }
 
     data class Unknown(

@@ -33,7 +33,9 @@ data class ProcessedImageResult(
     val displayHeight: Int,
     val displayData: ByteArray,
     val checksum: Int,
-    val isColor: Boolean = false
+    val isColor: Boolean = false,
+    /** 0 = 1-bit mono, 1 = RGB565, 2 = 2-bit gray (4 levels, 4 px/byte, leftmost pixel in the low bits) */
+    val format: Int = 0
 )
 
 object ImageProcessor {
@@ -55,7 +57,10 @@ object ImageProcessor {
      * memory while still being much higher resolution than the glasses output.
      */
     private const val PHOTO_DECODE_MAX_W = 2048
-    private const val FORCE_FULL_CANVAS = true
+    private const val FORCE_FULL_CANVAS = false
+
+    /** Send 4-level gray (format 2) instead of 1-bit. Needs the 2-bit glasses firmware. */
+    private const val USE_GRAY2 = true
     private const val PHOTO_DECODE_MAX_H = 2048
 
     fun decodeSampledBitmapFromUri(
@@ -259,7 +264,7 @@ object ImageProcessor {
      *        -> tiny black-speck cleanup
      *        -> packed 1-bit MSB-left bytes
      *
-     * New images are always stored as format 0 (1-bit mono).
+     * New images are stored as format 2 (2-bit gray) when USE_GRAY2 is on, otherwise format 0 (1-bit).
      */
     @Suppress("UNUSED_PARAMETER")
     fun processImage(
@@ -326,8 +331,11 @@ object ImageProcessor {
             targetHeight = deviceH,
             thresholdControl = threshold,
             invert = invert,
-            backgroundIsWhite = backgroundColorArgb != AndroidColor.BLACK
+            backgroundIsWhite = backgroundColorArgb != AndroidColor.BLACK,
+            gray2 = USE_GRAY2,
+            dither = useDithering
         )
+        val outFormat = if (USE_GRAY2) 2 else 0
 
         var checksumSum = 0
         for (b in packedBytes) {
@@ -346,12 +354,7 @@ object ImageProcessor {
          * It is not what gets sent to the glasses; deviceData is the authoritative
          * packed 1-bit representation.
          */
-        val displayBitmap = fitBitmapToCanvas(
-            source = cropped,
-            canvasWidth = clampedTargetW,
-            canvasHeight = clampedTargetH,
-            backgroundColorArgb = backgroundColorArgb
-        )
+        val displayBitmap = createPreviewBitmap(packedBytes, deviceW, deviceH, outFormat)
 
         return ProcessedImageResult(
             imageId = imageId,
@@ -362,7 +365,8 @@ object ImageProcessor {
             displayHeight = displayBitmap.height,
             displayData = bitmapToPng(displayBitmap),
             checksum = checksum,
-            isColor = false
+            isColor = false,
+            format = outFormat
         )
     }
 
@@ -454,7 +458,9 @@ object ImageProcessor {
         targetHeight: Int,
         thresholdControl: Int,
         invert: Boolean,
-        backgroundIsWhite: Boolean
+        backgroundIsWhite: Boolean,
+        gray2: Boolean = false,
+        dither: Boolean = false
     ): ByteArray {
         val srcRgba = Mat()
         val gray = Mat()
@@ -503,6 +509,12 @@ object ImageProcessor {
                 canvasHeight = targetHeight,
                 backgroundIsWhite = backgroundIsWhite
             )
+
+            // 4b. 2-bit gray: keep the anti-aliasing the 1-bit path throws away.
+            if (gray2) {
+                val levels = quantizeGray2(resized, thresholdControl, invert, dither)
+                return packGray2(levels, resized.cols(), resized.rows())
+            }
 
             // 5. Sauvola-style adaptive binarization.
             sauvolaThreshold(
@@ -679,6 +691,105 @@ object ImageProcessor {
         }
     }
 
+    /**
+     * Maps the resized grayscale image to 4 levels (0 = black ... 3 = white).
+     *
+     * 1. Stretch contrast: ~0.5th percentile -> black, 85th percentile -> white (paper).
+     * 2. Gamma from the slider (higher slider = lighter text).
+     * 3. Quantize to 4 levels, optionally with Floyd-Steinberg error diffusion (photos).
+     */
+    private fun quantizeGray2(
+        gray: Mat,
+        thresholdControl: Int,
+        invert: Boolean,
+        dither: Boolean
+    ): ByteArray {
+        val w = gray.cols()
+        val h = gray.rows()
+        val count = w * h
+        val px = ByteArray(count)
+        gray.get(0, 0, px)
+
+        val hist = IntArray(256)
+        for (p in px) hist[p.toInt() and 0xFF]++
+
+        fun percentile(fraction: Double): Int {
+            val target = (count * fraction).toInt()
+            var acc = 0
+            for (i in 0..255) {
+                acc += hist[i]
+                if (acc >= target) return i
+            }
+            return 255
+        }
+
+        var lo = percentile(0.005)
+        var hi = percentile(0.85)
+        if (hi - lo < 32) {
+            lo = 0
+            hi = 255
+        }
+
+        val gamma = Math.pow(2.0, -(thresholdControl.coerceIn(0, 255) - 128) / 128.0 * 0.7)
+        val lut = FloatArray(256) { i ->
+            val x = ((i - lo).toDouble() / (hi - lo).toDouble()).coerceIn(0.0, 1.0)
+            (Math.pow(x, gamma) * 255.0).toFloat()
+        }
+
+        val work = FloatArray(count) { lut[px[it].toInt() and 0xFF] }
+        val levels = ByteArray(count)
+
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val i = y * w + x
+                val old = work[i]
+                val level = Math.round(old / 85f).coerceIn(0, 3)
+                levels[i] = (if (invert) 3 - level else level).toByte()
+
+                if (dither) {
+                    val err = old - level * 85f
+                    if (x + 1 < w) work[i + 1] += err * 7f / 16f
+                    if (y + 1 < h) {
+                        if (x > 0) work[i + w - 1] += err * 3f / 16f
+                        work[i + w] += err * 5f / 16f
+                        if (x + 1 < w) work[i + w + 1] += err * 1f / 16f
+                    }
+                }
+            }
+        }
+        return levels
+    }
+
+    /** Packs 0..3 levels, 4 pixels per byte, leftmost pixel in the least significant bits. */
+    private fun packGray2(levels: ByteArray, width: Int, height: Int): ByteArray {
+        val rowBytes = (width + 3) / 4
+        val packed = ByteArray(rowBytes * height)
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val level = levels[y * width + x].toInt() and 0x03
+                val idx = y * rowBytes + (x shr 2)
+                packed[idx] = (packed[idx].toInt() or (level shl ((x and 3) * 2))).toByte()
+            }
+        }
+        return packed
+    }
+
+    fun createGray2PreviewBitmap(packed: ByteArray, width: Int, height: Int): Bitmap {
+        val rowBytes = (width + 3) / 4
+        val argb = IntArray(width * height)
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val idx = y * rowBytes + (x shr 2)
+                val level = if (idx < packed.size) (packed[idx].toInt() shr ((x and 3) * 2)) and 0x03 else 3
+                val v = level * 85
+                argb[y * width + x] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+            }
+        }
+        val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        bmp.setPixels(argb, 0, width, 0, 0, width, height)
+        return bmp
+    }
+
     private fun packBinaryMat(binary: Mat): ByteArray {
         val width = binary.cols()
         val height = binary.rows()
@@ -737,10 +848,10 @@ object ImageProcessor {
         height: Int,
         format: Int
     ): Bitmap =
-        if (format == 0) {
-            createOledPreviewBitmap(data, width, height)
-        } else {
-            createRgb565PreviewBitmap(data, width, height)
+        when (format) {
+            0 -> createOledPreviewBitmap(data, width, height)
+            2 -> createGray2PreviewBitmap(data, width, height)
+            else -> createRgb565PreviewBitmap(data, width, height)
         }
 
     fun createRgb565PreviewBitmap(

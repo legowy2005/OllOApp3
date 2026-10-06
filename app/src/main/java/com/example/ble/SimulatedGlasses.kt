@@ -225,6 +225,7 @@ class SimulatedGlasses(
         val valid = when (format) {
             0 -> width in 1..640 && height in 1..480 && dataLen == (((width + 7) / 8) * height).toLong() && dataLen <= 38_400L
             1 -> width in 1..320 && height in 1..240 && dataLen == width.toLong() * height.toLong() * 2L && dataLen <= 153_600L
+            2 -> width in 1..640 && height in 1..480 && dataLen == (((width + 3) / 4) * height).toLong() && dataLen <= 76_800L
             else -> false
         }
 
@@ -353,7 +354,7 @@ class SimulatedGlasses(
             putShort(480.toShort())
             putInt(153600)
             put(100.toByte())
-            put(0x01.toByte())
+            put(0x03.toByte())
         }.array()
 
         val parsed = PacketParser.parse(infoPacket)
